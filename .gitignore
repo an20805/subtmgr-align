@@ -1,0 +1,105 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+
+# =============================================================================
+# Virtual environments — keep specs in envs/, not the actual envs
+# =============================================================================
+.venv/
+venv/
+env/
+ENV/
+# Method-specific bundled venvs
+EMPOT/empot/
+alignOT/.venv/
+BOTalign/.venv/
+*/empot/
+*/env/
+
+# =============================================================================
+# Data files — too large to track in git
+# manage separately (local disk / DVC / symlinks)
+# =============================================================================
+*.mrc
+*.hdf
+*.map
+*.h5
+*.em
+*.rec
+*.st
+
+# Specific data directories
+Data/
+data/
+sample-data/
+Subtomograms_40_deg_uniform/
+alignOT/Data/
+BOTalign/data/
+EMPOT/sample-data/
+
+# =============================================================================
+# Experiment outputs — track config + logs + CSVs + PNGs, NOT volumes
+# =============================================================================
+# Block large volume outputs inside experiment folders
+experiments/*/reference_round_*.mrc
+experiments/*/particles*.hdf
+experiments/**/*.mrc
+experiments/**/*.hdf
+# But explicitly UN-ignore the small files we do want
+!experiments/**/config.yaml
+!experiments/**/notes.md
+!experiments/**/*.csv
+!experiments/**/*.png
+!experiments/**/*.log
+!experiments/**/run.log
+
+# EMPOT run outputs (old location — volumes only)
+EMPOT/outputs/iterative_runs/**/*.mrc
+EMPOT/outputs/iterative_runs/**/*.hdf
+
+# BOTalign large outputs
+BOTalign/notebooks/cluster0_iterative_alignment_outputs/
+BOTalign/figures/
+
+# =============================================================================
+# Jupyter
+# =============================================================================
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# =============================================================================
+# Tool / OS artifacts
+# =============================================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.claude/
+.idea/
+
+# EMAN2 logs
+.eman2log.txt
+*.err.log
+aspire.err.log
+
+# =============================================================================
+# Misc
+# =============================================================================
+logs/
+*.log
+# But keep experiment run.log (covered by !experiments/**/*.log above)
+
+# Scratch / temp
+scratch/
+tmp/
+*.tmp
+*.bak

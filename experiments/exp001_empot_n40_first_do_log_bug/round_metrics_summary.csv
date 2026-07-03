@@ -1,0 +1,6 @@
+round,reference_l2_change,reference_mean_abs_change,reference_max_abs_change,n_subtomograms,mean_runtime_s,mean_ugw_dist,reference_path,round_runtime_s
+1,0.0,0.0,0.0,40,0.4340999494499556,0.0,/home/anshu/subtmgr-align/EMPOT/outputs/iterative_runs/run_20260623_130603_N40_first/reference_round_01.mrc,17.94024554600037
+2,0.0,0.0,0.0,40,0.42329405507489354,0.0,/home/anshu/subtmgr-align/EMPOT/outputs/iterative_runs/run_20260623_130603_N40_first/reference_round_02.mrc,17.41689749299985
+3,0.0,0.0,0.0,40,0.43153948457447766,0.0,/home/anshu/subtmgr-align/EMPOT/outputs/iterative_runs/run_20260623_130603_N40_first/reference_round_03.mrc,17.73671566000121
+4,0.0,0.0,0.0,40,0.42317271495003295,0.0,/home/anshu/subtmgr-align/EMPOT/outputs/iterative_runs/run_20260623_130603_N40_first/reference_round_04.mrc,17.40140610099843
+5,0.0,0.0,0.0,40,0.43111401919959463,0.0,/home/anshu/subtmgr-align/EMPOT/outputs/iterative_runs/run_20260623_130603_N40_first/reference_round_05.mrc,17.730638286000612

@@ -1,0 +1,2 @@
+round,reference_l2_change,reference_mean_abs_change,reference_max_abs_change,n_subtomograms,mean_runtime_s,mean_ugw_dist,reference_path,round_runtime_s
+1,519.781494140625,0.4742376208305359,3.1519088745117188,5,397.66535390639984,30748.46894482039,/home/anshu/subtmgr-align/EMPOT/outputs/iterative_runs/run_20260625_075848_N5_first/reference_round_01.mrc,1991.7821702509973

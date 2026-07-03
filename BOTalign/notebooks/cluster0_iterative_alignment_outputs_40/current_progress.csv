@@ -1,0 +1,2 @@
+round,status,processed_subtomograms,total_subtomograms,reference_path,rotations_path,metrics_path
+5,round_complete,40,40,/home/anshu/subtmgr-align/BOTalign/notebooks/cluster0_iterative_alignment_outputs_40/reference_round_05.mrc,/home/anshu/subtmgr-align/BOTalign/notebooks/cluster0_iterative_alignment_outputs_40/final_rotations.csv,/home/anshu/subtmgr-align/BOTalign/notebooks/cluster0_iterative_alignment_outputs_40/alignment_metrics.csv

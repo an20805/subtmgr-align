@@ -1,0 +1,21 @@
+experiment_id: exp003
+date: 2026-06-25
+method: empot
+description: "Minimal run (N=5) to confirm divergence is not a scale issue"
+status: FAILED (confirmed method limitation)
+
+data:
+  cluster_dir: Data/0.1/Cluster_0
+  n_sbtms: 5
+  selection_mode: first
+
+params:
+  n_rounds: 5
+  threshold: 0.7
+  num_points: 500
+  eps: 10000
+  seed: 42
+
+environment:
+  python: EMPOT/empot/bin/python3
+  runner: EMPOT/src/run_iterative_alignment.py

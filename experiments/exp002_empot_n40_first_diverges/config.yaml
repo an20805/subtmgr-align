@@ -1,0 +1,21 @@
+experiment_id: exp002
+date: 2026-06-23
+method: empot
+description: "First real run after do_log fix — alignment runs but average diverges"
+status: FAILED (method limitation)
+
+data:
+  cluster_dir: Data/0.1/Cluster_0
+  n_sbtms: 40
+  selection_mode: first
+
+params:
+  n_rounds: 5
+  threshold: 0.7
+  num_points: 500
+  eps: 10000
+  seed: 42
+
+environment:
+  python: EMPOT/empot/bin/python3
+  runner: EMPOT/src/run_iterative_alignment.py
