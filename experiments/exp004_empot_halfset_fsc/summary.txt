@@ -1,0 +1,6 @@
+FSC comparison
+Vol1: EMPOT/outputs/halfset/exp004_empot_halfset_even/run_20260706_084527_even/reference_round_01.mrc
+Vol2: EMPOT/outputs/halfset/exp004_empot_halfset_odd/run_20260706_091452_odd/reference_round_01.mrc
+Pixel size: 4.0 Å
+Resolution @ FSC=0.5  : 55.4 Å
+Resolution @ FSC=0.143: 28.8 Å
