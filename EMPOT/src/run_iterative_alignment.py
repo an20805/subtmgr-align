@@ -8,7 +8,6 @@ import gc
 import random
 from pathlib import Path
 from datetime import datetime
-from tracemalloc import start
 
 import numpy as np
 import pandas as pd
@@ -52,7 +51,15 @@ def main():
     parser.add_argument("--cluster_dir", type=str, default="/home/anshu/subtmgr-align/Data/0.1/Cluster_0", help="Directory containing subtomograms")
     parser.add_argument("--output_base_dir", type=str, default="/home/anshu/subtmgr-align/EMPOT/outputs/iterative_runs", help="Base directory for output runs")
     parser.add_argument("--n_sbtms", type=int, default=5, help="Number of subtomograms to process (default: all)")
-    parser.add_argument("--selection_mode", type=str, choices=["first", "random"], default="first", help="How to select subset of subtomograms")
+    parser.add_argument("--selection_mode", type=str,
+                        choices=["first", "random", "even", "odd"],
+                        default="first",
+                        help="How to select subtomograms: "
+                             "'first' = first N by filename order, "
+                             "'random' = random N, "
+                             "'even' = all even-numbered files (0,2,4,...), "
+                             "'odd'  = all odd-numbered files (1,3,5,...). "
+                             "For even/odd, --n_sbtms is ignored.")
     parser.add_argument("--n_rounds", type=int, default=1, help="Number of alignment rounds")
     parser.add_argument("--threshold", type=float, default=0.1, help="Density threshold for sampling")
     parser.add_argument("--num_points", type=int, default=2000, help="Number of points to sample per volume")
@@ -63,7 +70,10 @@ def main():
 
     # 1. Setup run folder
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"run_{timestamp}_N{args.n_sbtms if args.n_sbtms else 'All'}_{args.selection_mode}"
+    if args.selection_mode in ("even", "odd"):
+        run_name = f"run_{timestamp}_{args.selection_mode}"
+    else:
+        run_name = f"run_{timestamp}_N{args.n_sbtms if args.n_sbtms else 'All'}_{args.selection_mode}"
     output_dir = Path(args.output_base_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -81,16 +91,24 @@ def main():
     all_paths = get_cluster_paths(args.cluster_dir)
     logger.info(f"Discovered {len(all_paths)} total subtomograms in {args.cluster_dir}")
 
-    if args.n_sbtms is not None and args.n_sbtms < len(all_paths):
+    if args.selection_mode == "even":
+        # Select files whose numeric stem is even: 0.mrc, 2.mrc, 4.mrc, ...
+        cluster_paths = [p for p in all_paths if int(p.stem) % 2 == 0]
+        logger.info(f"Selected {len(cluster_paths)} even-numbered subtomograms (half-set FSC split).")
+    elif args.selection_mode == "odd":
+        # Select files whose numeric stem is odd: 1.mrc, 3.mrc, 5.mrc, ...
+        cluster_paths = [p for p in all_paths if int(p.stem) % 2 == 1]
+        logger.info(f"Selected {len(cluster_paths)} odd-numbered subtomograms (half-set FSC split).")
+    elif args.n_sbtms is not None and args.n_sbtms < len(all_paths):
         if args.selection_mode == "first":
             cluster_paths = all_paths[:args.n_sbtms]
             logger.info(f"Selected first {args.n_sbtms} subtomograms.")
-        else: # random
+        else:  # random
             cluster_paths = random.sample(all_paths, args.n_sbtms)
             logger.info(f"Randomly selected {args.n_sbtms} subtomograms.")
     else:
         cluster_paths = all_paths
-        logger.info("Using all available subtomograms.")
+        logger.info(f"Using all {len(cluster_paths)} available subtomograms.")
 
     n_actual = len(cluster_paths)
     
