@@ -1,0 +1,6 @@
+FSC comparison
+Vol1: eman2_baseline/baseline_avg_even.mrc
+Vol2: eman2_baseline/baseline_avg_odd.mrc
+Pixel size: 4.0 Å
+Resolution @ FSC=0.5  : 23.3 Å
+Resolution @ FSC=0.143: 19.7 Å

@@ -29,7 +29,7 @@ ODD_MRC=eman2_baseline/baseline_avg_odd.mrc
 FSC_OUT=experiments/eman2_halfset_fsc
 APIX=4.0
 
-NITER=1      # number of alignment rounds (same as full baseline run)
+NITER=2      # number of alignment rounds (same as full baseline run)
 SHRINK=3     # downsampling factor for alignment (same as full baseline run)
 NPROC=14     # CPU cores
 

@@ -152,7 +152,11 @@ def compute_fsc(vol1, vol2):
     for i in range(n_shells):
         lo = i * shell_width
         hi = lo + shell_width
-        mask = (r >= lo) & (r < hi)
+        # Exclude the DC component (r=0, the volume mean) — it is always
+        # numerically unstable for normalized volumes and carries no
+        # resolution information.  Apply r > 0 so the DC voxel is never
+        # included in any shell.
+        mask = (r >= lo) & (r < hi) & (r > 0)
         n_vox = int(mask.sum())
         n_voxels[i] = n_vox
         if n_vox == 0:
@@ -169,15 +173,21 @@ def compute_fsc(vol1, vol2):
     return shell_centers, fsc_values, n_voxels
 
 
-def resolution_at_threshold(shell_centers, fsc_values, threshold, apix):
+def resolution_at_threshold(shell_centers, fsc_values, threshold, apix, n_voxels=None):
     """
     Return the spatial resolution (in Angstroms) where FSC first drops
     below `threshold`.  Returns None if FSC never drops below threshold.
-    apix : pixel size in Angstroms.
+    apix      : pixel size in Angstroms.
+    n_voxels  : optional array; shells with <= 1 voxel (DC shell) are skipped.
     """
-    for freq, val in zip(shell_centers, fsc_values):
-        if val < threshold and freq > 0:
-            # resolution = pixel_size / spatial_frequency
+    for i, (freq, val) in enumerate(zip(shell_centers, fsc_values)):
+        if freq <= 0:
+            continue
+        # Skip the DC/near-DC shell — it contains only the volume mean and
+        # is numerically unstable for zero-mean normalized volumes.
+        if n_voxels is not None and n_voxels[i] <= 1:
+            continue
+        if val < threshold:
             return apix / freq
     return None   # FSC stays above threshold up to Nyquist
 
@@ -186,24 +196,49 @@ def resolution_at_threshold(shell_centers, fsc_values, threshold, apix):
 # Plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_fsc(shell_centers, fsc_curves, labels, apix, title, output_path):
+def plot_fsc(shell_centers, fsc_curves, labels, apix, title, output_path,
+             n_voxels_list=None):
     """
     Plot one or more FSC curves on the same axes.
 
     Parameters
     ----------
-    fsc_curves : list of np.ndarray  — one per curve
-    labels     : list of str
+    fsc_curves      : list of np.ndarray  — one per curve
+    labels          : list of str
+    n_voxels_list   : optional list of np.ndarray — one per curve;
+                      shells with n_voxels == 0 (empty DC shell) are excluded
+                      from the plot so the curve starts at the first real shell.
     """
-    # x-axis: resolution in Angstroms  (1/freq * apix, avoid div-by-zero at DC)
+    # x-axis: resolution in Angstroms (apix / freq), skipping DC (freq=0)
     with np.errstate(divide="ignore", invalid="ignore"):
         resolution_A = np.where(shell_centers > 0, apix / shell_centers, np.inf)
 
+    # Nyquist resolution = 2 * apix
+    nyquist_A = 2.0 * apix
+
     fig, ax = plt.subplots(figsize=(9, 5))
 
+    x_max = nyquist_A  # will grow to fit all curve start points
     colors = plt.cm.tab10(np.linspace(0, 0.5, len(fsc_curves)))
-    for fsc, label, color in zip(fsc_curves, labels, colors):
-        ax.plot(resolution_A, fsc, label=label, color=color, linewidth=2)
+
+    for idx, (fsc, label, color) in enumerate(zip(fsc_curves, labels, colors)):
+        # Build mask: only plot shells that have actual data (n_voxels > 0)
+        if n_voxels_list is not None:
+            n_vox = n_voxels_list[idx]
+            valid = (n_vox > 0) & (resolution_A < np.inf)
+        else:
+            valid = resolution_A < np.inf
+
+        res_plot = resolution_A[valid]
+        fsc_plot = fsc[valid]
+
+        if len(res_plot) == 0:
+            continue
+
+        ax.plot(res_plot, fsc_plot, label=label, color=color, linewidth=2)
+
+        # Track the coarsest resolution plotted (for x-axis limit)
+        x_max = max(x_max, res_plot.max())
 
     # Standard threshold lines
     ax.axhline(0.5,   color="grey",  linestyle="--", linewidth=1, label="FSC = 0.5")
@@ -213,7 +248,12 @@ def plot_fsc(shell_centers, fsc_curves, labels, apix, title, output_path):
     ax.set_ylabel("FSC", fontsize=12)
     ax.set_title(title, fontsize=13)
     ax.set_ylim(-0.1, 1.05)
-    ax.invert_xaxis()   # high resolution (small Å) on the right
+
+    # x-axis: high resolution (small Å) on right, low resolution (large Å) on left
+    # Pad the left limit by 10% so the curve doesn't start at the plot edge
+    ax.set_xlim(nyquist_A, x_max * 1.10)
+    ax.invert_xaxis()
+
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
 
@@ -254,8 +294,8 @@ def mode_halfset(args):
     shell_centers, fsc_values, n_voxels = compute_fsc(avg_even, avg_odd)
 
     # Report resolutions
-    res_05  = resolution_at_threshold(shell_centers, fsc_values, 0.5,   args.apix)
-    res_143 = resolution_at_threshold(shell_centers, fsc_values, 0.143, args.apix)
+    res_05  = resolution_at_threshold(shell_centers, fsc_values, 0.5,   args.apix, n_voxels)
+    res_143 = resolution_at_threshold(shell_centers, fsc_values, 0.143, args.apix, n_voxels)
     print(f"\n{'─'*40}")
     print(f"  Half-set FSC (raw data, no alignment)")
     print(f"  Resolution @ FSC=0.5  : {f'{res_05:.1f} Å' if res_05 else 'not reached'}")
@@ -281,6 +321,7 @@ def mode_halfset(args):
         apix=args.apix,
         title="Half-Set FSC — Raw Data (Floor / Ceiling Estimate)",
         output_path=output_dir / "fsc_halfset_raw.png",
+        n_voxels_list=[n_voxels],
     )
 
     # Save summary txt
@@ -317,8 +358,8 @@ def mode_compare(args):
     label1 = args.label1 if args.label1 else Path(args.vol1).name
     label2 = args.label2 if args.label2 else Path(args.vol2).name
 
-    res_05  = resolution_at_threshold(shell_centers, fsc_values, 0.5,   args.apix)
-    res_143 = resolution_at_threshold(shell_centers, fsc_values, 0.143, args.apix)
+    res_05  = resolution_at_threshold(shell_centers, fsc_values, 0.5,   args.apix, n_voxels)
+    res_143 = resolution_at_threshold(shell_centers, fsc_values, 0.143, args.apix, n_voxels)
     print(f"\n{'─'*40}")
     print(f"  FSC: {label1}  vs  {label2}")
     print(f"  Resolution @ FSC=0.5  : {f'{res_05:.1f} Å' if res_05 else 'not reached'}")
@@ -342,6 +383,7 @@ def mode_compare(args):
         apix=args.apix,
         title=f"FSC Comparison  |  apix={args.apix}Å",
         output_path=output_dir / "fsc_compare.png",
+        n_voxels_list=[n_voxels],
     )
 
     summary = (
@@ -395,8 +437,8 @@ def mode_vs_baseline(args):
     print("Computing FSC...")
     shell_centers, fsc_values, n_voxels = compute_fsc(vol_exp, vol_base)
 
-    res_05  = resolution_at_threshold(shell_centers, fsc_values, 0.5,   args.apix)
-    res_143 = resolution_at_threshold(shell_centers, fsc_values, 0.143, args.apix)
+    res_05  = resolution_at_threshold(shell_centers, fsc_values, 0.5,   args.apix, n_voxels)
+    res_143 = resolution_at_threshold(shell_centers, fsc_values, 0.143, args.apix, n_voxels)
     print(f"\n{'─'*40}")
     print(f"  FSC: experiment final ref  vs  EMAN2 baseline")
     print(f"  Resolution @ FSC=0.5  : {f'{res_05:.1f} Å' if res_05 else 'not reached'}")
@@ -424,6 +466,7 @@ def mode_vs_baseline(args):
         apix=args.apix,
         title=f"FSC vs EMAN2 Baseline  |  apix={args.apix}Å",
         output_path=output_dir / "fsc_vs_baseline.png",
+        n_voxels_list=[n_voxels],
     )
 
     summary = (
