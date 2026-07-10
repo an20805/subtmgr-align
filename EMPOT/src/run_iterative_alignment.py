@@ -24,7 +24,8 @@ from iterative_utils import (
     prepare_sampling_volume,
     sample_volume_in_memory,
     run_empot_alignment,
-    apply_rigid_transform_to_volume
+    apply_rigid_transform_to_volume,
+    gaussian_lowpass_filter,
 )
 
 def setup_logger(log_file):
@@ -65,6 +66,20 @@ def main():
     parser.add_argument("--num_points", type=int, default=2000, help="Number of points to sample per volume")
     parser.add_argument("--eps", type=float, default=10000, help="Entropy regularization parameter for EMPOT UGW")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--init_reference", type=str, default=None,
+        help="Optional path to an external MRC file to use as the round-0 reference "
+             "instead of computing a streaming average from the input particles. "
+             "The volume is center-cropped to match the subtomogram shape if sizes differ."
+    )
+    parser.add_argument(
+        "--lowpass_sigma", type=float, default=None,
+        help="Sigma (in voxels) of the Gaussian low-pass filter applied to volumes "
+             "BEFORE point-cloud sampling. Does NOT affect the averaged output. "
+             "Cutoff resolution ≈ 2.35 * sigma * apix Å  "
+             "(e.g. sigma=2 at apix=4 Å ≈ 19 Å cutoff). "
+             "Default: None (no filtering)."
+    )
     
     args = parser.parse_args()
 
@@ -112,11 +127,47 @@ def main():
 
     n_actual = len(cluster_paths)
     
-    # 4. Compute initial average
-    logger.info("Computing initial reference (Round 0)...")
-    reference_round_00 = compute_streaming_average(cluster_paths, logger=logger, progress_every=max(1, n_actual//10))
-    reference_round_00_path = save_mrc(output_dir / "reference_round_00.mrc", reference_round_00)
-    logger.info(f"Saved initial reference to {reference_round_00_path}")
+    # 4. Compute or load the initial reference (Round 0)
+    if args.init_reference is not None:
+        # ── External seed reference (e.g., EMAN2 final average) ──────────────
+        logger.info(f"Loading external initial reference from: {args.init_reference}")
+        external_ref = load_mrc(Path(args.init_reference), permissive=True)
+
+        # Auto center-crop to match the subtomogram shape if needed
+        sbtm_shape = np.array(load_mrc(cluster_paths[0], permissive=True).shape)
+        ref_shape   = np.array(external_ref.shape)
+        if not np.array_equal(ref_shape, sbtm_shape):
+            if np.any(ref_shape < sbtm_shape):
+                raise ValueError(
+                    f"init_reference shape {tuple(ref_shape)} is smaller than "
+                    f"subtomogram shape {tuple(sbtm_shape)}. Cannot crop."
+                )
+            slices = tuple(
+                slice((r - s) // 2, (r - s) // 2 + s)
+                for r, s in zip(ref_shape, sbtm_shape)
+            )
+            external_ref = external_ref[slices].copy()
+            logger.info(
+                f"Center-cropped external reference: {tuple(ref_shape)} → {external_ref.shape}"
+            )
+        else:
+            logger.info(f"External reference shape matches subtomograms: {tuple(ref_shape)}")
+
+        reference_round_00 = external_ref.astype(np.float32)
+        reference_round_00_path = save_mrc(
+            output_dir / "reference_round_00.mrc", reference_round_00
+        )
+        logger.info(f"Saved (external) initial reference to {reference_round_00_path}")
+    else:
+        # ── Default: compute streaming average of the input particles ─────────
+        logger.info("Computing initial reference (Round 0) from input particles...")
+        reference_round_00 = compute_streaming_average(
+            cluster_paths, logger=logger, progress_every=max(1, n_actual // 10)
+        )
+        reference_round_00_path = save_mrc(
+            output_dir / "reference_round_00.mrc", reference_round_00
+        )
+        logger.info(f"Saved initial reference to {reference_round_00_path}")
 
     show_volume_slices(reference_round_00, "Initial average (Round 0)", save_path=output_dir / "slices_round_00.png")
 
@@ -131,7 +182,9 @@ def main():
 
 
         # Prepare and sample the reference
-        reference_sampling_volume = prepare_sampling_volume(current_reference)
+        # Apply low-pass filter before sampling (not before averaging)
+        ref_for_sampling = gaussian_lowpass_filter(current_reference, args.lowpass_sigma)
+        reference_sampling_volume = prepare_sampling_volume(ref_for_sampling)
         pts_ref = sample_volume_in_memory(
             reference_sampling_volume,
             threshold=args.threshold,
@@ -150,9 +203,10 @@ def main():
         for item_idx, path in enumerate(cluster_paths, start=1):
             subtomogram_start = time.perf_counter()
             
-            # Load and sample
+            # Load and sample (apply low-pass only for sampling, not for accumulation)
             volume = load_mrc(path, permissive=True)
-            sampling_volume = prepare_sampling_volume(volume)
+            vol_for_sampling = gaussian_lowpass_filter(volume, args.lowpass_sigma)
+            sampling_volume = prepare_sampling_volume(vol_for_sampling)
             pts_tgt = sample_volume_in_memory(
                 sampling_volume,
                 threshold=args.threshold,

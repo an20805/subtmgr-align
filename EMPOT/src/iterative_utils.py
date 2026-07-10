@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import mrcfile
 import torch
-from scipy.ndimage import affine_transform
+from scipy.ndimage import affine_transform, gaussian_filter
 from scipy.spatial.transform import Rotation
 
 # Import from existing EMPOT modules
@@ -90,6 +90,26 @@ def normalize_volume(volume):
     if vmax <= 0:
         raise ValueError("Volume is constant after normalization.")
     return volume / (vmax + 1e-8)
+
+def gaussian_lowpass_filter(volume, sigma):
+    """
+    Apply an isotropic Gaussian low-pass filter in real space.
+
+    Parameters
+    ----------
+    volume : np.ndarray  (3-D float32)
+    sigma  : float  — standard deviation in voxels.
+             Rough resolution cutoff ≈ 2.35 * sigma * apix  Å.
+             E.g., sigma=2 at apix=4 Å ≈ 19 Å cutoff.
+             sigma=0 or None → no filtering (identity).
+
+    Returns
+    -------
+    np.ndarray  same shape and dtype as input
+    """
+    if sigma is None or sigma <= 0:
+        return volume
+    return gaussian_filter(volume.astype(np.float32), sigma=float(sigma))
 
 def prepare_sampling_volume(volume):
     norm = normalize_volume(volume)
