@@ -37,7 +37,7 @@ APIX=4.0
 
 # EMPOT alignment hyperparameters
 N_ROUNDS=1
-THRESHOLD=0.1
+THRESHOLD=0.7
 NUM_POINTS=500
 EPS=10000
 # Low-pass sigma in voxels. Cutoff ≈ 2.35 * sigma * apix Å
