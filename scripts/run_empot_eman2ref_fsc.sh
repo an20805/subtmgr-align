@@ -28,11 +28,11 @@ FSC_SCRIPT=scripts/compute_fsc.py
 CLUSTER_DIR=Subtomograms_40_deg_uniform/0.1/Cluster_0
 OUTPUT_BASE=EMPOT/outputs/iterative_runs
 
-# EMAN2 half-set references (96³, will be auto-cropped to 91³ by alignment script)
-EVEN_REF=eman2_baseline/baseline_avg_even.mrc
-ODD_REF=eman2_baseline/baseline_avg_odd.mrc
+# EMAN2 iter04 half-set references (best EMAN2 output, 96³ → auto-cropped to 91³)
+EVEN_REF="eman2_baseline/baseline_avg_even_iter04.mrc"
+ODD_REF="eman2_baseline/baseline_avg_odd_iter04.mrc"
 
-FSC_OUT=experiments/empot_eman2ref_fsc
+FSC_OUT=experiments/empot_eman2ref_iter04_fsc
 APIX=4.0
 
 # EMPOT alignment hyperparameters
