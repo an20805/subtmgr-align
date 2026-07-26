@@ -24,6 +24,7 @@ rsync -avz \
     --exclude 'Subtomograms_40_deg_uniform/' \
     --exclude 'eman2_baseline/' \
     --exclude 'EMPOT/outputs/' \
+    --exclude 'papers/' \
     ./ ${SERVER}:${REMOTE_DIR}
 
 echo "------------------------------------------------------"

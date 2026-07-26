@@ -1,0 +1,26 @@
+FSC vs Ground Truth (Data/0.mrc)  —  apix = 4.0 Å
+============================================================
+
+Label                       FSC@0.143 (Å)   FSC@0.5 (Å)
+-------------------------------------------------------
+EMAN2 iter00                         22.0          35.3
+EMAN2 iter01                         22.0          35.5
+EMAN2 iter02                         22.4          35.7
+EMAN2 iter03                         22.4          36.2
+EMAN2 iter04                         33.3          58.3
+EMPOT round00                        21.5          78.7
+EMPOT round01                        21.5          51.4
+EMPOT round02                        31.5          52.2
+EMPOT round03                        32.2          54.2
+EMPOT round04                        34.7          61.7
+EMPOT round05                        48.1          67.8
+EMPOT round06                        53.9          85.5
+EMPOT round07                        61.2          98.8
+EMPOT round08                        70.0         108.2
+EMPOT round09                        76.6         113.6
+EMPOT round10                        83.5         122.5
+EMPOT round11                        90.2         131.8
+EMPOT round12                        93.3         135.8
+EMPOT round13                        99.7         147.1
+EMPOT round14                       103.8         158.4
+EMPOT round15                       108.9         167.0

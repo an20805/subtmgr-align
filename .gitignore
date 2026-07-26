@@ -46,6 +46,7 @@ Subtomograms_40_deg_uniform/
 alignOT/Data/
 BOTalign/data/
 EMPOT/sample-data/
+papers/
 
 # =============================================================================
 # Experiment outputs — track config + logs + CSVs + PNGs, NOT volumes

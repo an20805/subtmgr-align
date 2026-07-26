@@ -146,10 +146,11 @@ def run_empot_alignment(pts_ref, pts_tgt,
     dx = np.sum((pts_ref[:, None, :] - pts_ref[None, :, :]) ** 2, axis=-1)
     dy = np.sum((pts_tgt[:, None, :] - pts_tgt[None, :, :]) ** 2, axis=-1)
 
-    a_t = torch.from_numpy(a)
-    b_t = torch.from_numpy(b)
-    dx_t = torch.from_numpy(dx)
-    dy_t = torch.from_numpy(dy)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    a_t = torch.from_numpy(a).to(device)
+    b_t = torch.from_numpy(b).to(device)
+    dx_t = torch.from_numpy(dx).to(device)
+    dy_t = torch.from_numpy(dy).to(device)
 
     pi, gamma = log_ugw_sinkhorn(
         a_t, dx_t, b_t, dy_t, init=None, eps=eps,
@@ -161,7 +162,7 @@ def run_empot_alignment(pts_ref, pts_tgt,
 
     dist = float(l2_distortion(pi, gamma, dx_t, dy_t))
 
-    pi_np = np.array(pi)
+    pi_np = pi.cpu().numpy() if hasattr(pi, 'cpu') else np.array(pi)
     all_coup = []
     for i in range(n_tgt):
         j = int(np.argmax(pi_np[:, i]))

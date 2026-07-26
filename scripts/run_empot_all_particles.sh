@@ -24,6 +24,7 @@ NUM_POINTS=500
 LOWPASS_SIGMA=2
 EPS=10000
 SEED=42
+REJECTION_FRACTION=0.2   # drop worst 20% by UGW distance each round (0.0 = keep all)
 
 echo "================================================================"
 echo " EMPOT iterative alignment — ALL 200 subtomograms"
@@ -34,6 +35,7 @@ echo "  Rounds      : ${N_ROUNDS}"
 echo "  Threshold   : ${THRESHOLD}"
 echo "  Points      : ${NUM_POINTS}"
 echo "  Lowpass σ   : ${LOWPASS_SIGMA} vox"
+echo "  Rejection   : ${REJECTION_FRACTION} (worst fraction dropped per round)"
 echo "  Output dir  : ${OUTPUT_DIR}"
 echo "================================================================"
 
@@ -46,9 +48,10 @@ mkdir -p "${OUTPUT_DIR}"
     --n_rounds         "${N_ROUNDS}" \
     --threshold        "${THRESHOLD}" \
     --num_points       "${NUM_POINTS}" \
-    --lowpass_sigma    "${LOWPASS_SIGMA}" \
-    --eps              "${EPS}" \
-    --seed             "${SEED}"
+    --lowpass_sigma       "${LOWPASS_SIGMA}" \
+    --rejection_fraction  "${REJECTION_FRACTION}" \
+    --eps                 "${EPS}" \
+    --seed                "${SEED}"
 
 echo ""
 echo "Done. Results saved in ${OUTPUT_DIR}"

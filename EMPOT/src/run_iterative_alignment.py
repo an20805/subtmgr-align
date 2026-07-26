@@ -81,7 +81,16 @@ def main():
              "(e.g. sigma=2 at apix=4 Å ≈ 19 Å cutoff). "
              "Default: None (no filtering)."
     )
-    
+    parser.add_argument(
+        "--rejection_fraction", type=float, default=0.0,
+        help="Fraction of worst-scoring particles (highest UGW distance) to exclude "
+             "from averaging each round. Applied per-round independently. "
+             "0.0 = keep all (default, backward-compatible). "
+             "0.2 = drop worst 20%%, keep best 80%% (EMAN2 light). "
+             "0.33 = drop worst 33%% (EMAN2 aggressive). "
+             "Rejected particles are still aligned and logged, just not averaged."
+    )
+
     args = parser.parse_args()
 
     # 1. Setup run folder
@@ -197,70 +206,113 @@ def main():
         )
         
 
-        sum_transformed = np.zeros_like(current_reference, dtype=np.float64)
-        count = 0
-        subtomogram_rows = []
+        # ── Single-pass: align, transform, and store all volumes in memory ───────
+        # Each particle is loaded once: aligned, transformed, kept in memory.
+        # Transformed volumes are ~575 MB total (200 × 91³ × 4 bytes) — acceptable.
+        # Rejection decision and accumulation happen after the loop.
+        alignment_results = []   # list of dicts: subtomogram_id, ugw_dist, transformed_vol, runtime_s
+        n_aligned = 0
 
         progress_every = max(1, n_actual // 10)
-        cleanup_every = 10
+        cleanup_every  = 10
 
         for item_idx, path in enumerate(cluster_paths, start=1):
             subtomogram_start = time.perf_counter()
-            
-            # Load and sample (apply low-pass only for sampling, not for accumulation)
-            volume = load_mrc(path, permissive=True)
+
+            # Load raw volume (kept for transformation below)
+            volume           = load_mrc(path, permissive=True)
             vol_for_sampling = gaussian_lowpass_filter(volume, args.lowpass_sigma)
-            sampling_volume = prepare_sampling_volume(vol_for_sampling)
+            sampling_volume  = prepare_sampling_volume(vol_for_sampling)
             pts_tgt = sample_volume_in_memory(
                 sampling_volume,
                 threshold=args.threshold,
                 num_points=args.num_points,
-                random_seed=args.seed + round_idx + count,
+                random_seed=args.seed + round_idx + n_aligned,
             )
+            del vol_for_sampling, sampling_volume
 
             # Align using EMPOT
             try:
-                # start = time.perf_counter()
                 Abar, Bbar, R_recovered, dist = run_empot_alignment(
                     pts_ref, pts_tgt,
                     eps=args.eps,
                     nits_plan=100, nits_sinkhorn=100
                 )
-                # end = time.perf_counter()
-                # print(f"Time taken: {end - start:.6f} seconds")
-                # exit()
             except Exception as e:
                 logger.error(f"Alignment failed for {path.name}: {e}")
-                del volume, sampling_volume, pts_tgt
+                del volume, pts_tgt
                 continue
-            
-            # Transform volume
-            transformed_volume = apply_rigid_transform_to_volume(volume, R_recovered, Abar, Bbar)
 
-            # Accumulate
-            sum_transformed += transformed_volume
-            count += 1
+            del pts_tgt
+
+            # Transform the raw volume and store in memory
+            transformed_volume = apply_rigid_transform_to_volume(volume, R_recovered, Abar, Bbar)
+            del volume
+
+            n_aligned += 1
             runtime_s = time.perf_counter() - subtomogram_start
-            
-            subtomogram_rows.append({
-                "round": round_idx,
-                "subtomogram_id": int(path.stem),
-                "file_name": path.name,
-                "runtime_s": float(runtime_s),
-                "ugw_dist": float(dist),
+
+            alignment_results.append({
+                "subtomogram_id":   int(path.stem),
+                "file_name":        path.name,
+                "ugw_dist":         float(dist),
+                "transformed_vol":  transformed_volume,   # kept in memory
+                "runtime_s":        float(runtime_s),
             })
 
             if item_idx % progress_every == 0 or item_idx == n_actual:
                 logger.info(f"  Round {round_idx}: aligned {item_idx}/{n_actual} subtomograms")
 
-            # Cleanup
-            del volume, sampling_volume, pts_tgt, transformed_volume, R_recovered
             if item_idx % cleanup_every == 0:
                 gc.collect()
 
-        if count == 0:
+        if n_aligned == 0:
             logger.error("No subtomograms successfully aligned in this round. Aborting.")
             break
+
+        # ── Rejection decision ────────────────────────────────────────────────
+        if args.rejection_fraction > 0.0:
+            alignment_results.sort(key=lambda r: r["ugw_dist"])
+            n_keep        = max(1, int(round(n_aligned * (1.0 - args.rejection_fraction))))
+            accepted      = alignment_results[:n_keep]
+            rejected      = alignment_results[n_keep:]
+            ugw_threshold = float(accepted[-1]["ugw_dist"])
+            logger.info(
+                f"  Particle rejection (fraction={args.rejection_fraction}): "
+                f"keeping {n_keep}/{n_aligned}, "
+                f"dropped {len(rejected)}, "
+                f"UGW acceptance threshold = {ugw_threshold:.2f}"
+            )
+        else:
+            accepted      = alignment_results
+            rejected      = []
+            ugw_threshold = float("nan")
+
+        accepted_ids = {id(r) for r in accepted}
+
+        # ── Accumulate accepted transformed volumes (already in memory) ───────
+        sum_transformed = np.zeros_like(current_reference, dtype=np.float64)
+        for res in accepted:
+            sum_transformed += res["transformed_vol"]
+        count = len(accepted)
+
+        # Free all stored volumes now that accumulation is done
+        for res in alignment_results:
+            del res["transformed_vol"]
+        gc.collect()
+
+        # ── Build per-round per-particle CSV rows ─────────────────────────────
+        subtomogram_rows = [
+            {
+                "round":          round_idx,
+                "subtomogram_id": res["subtomogram_id"],
+                "file_name":      res["file_name"],
+                "runtime_s":      res["runtime_s"],
+                "ugw_dist":       res["ugw_dist"],
+                "accepted":       id(res) in accepted_ids,
+            }
+            for res in alignment_results
+        ]
 
         # Form next reference
         next_reference = (sum_transformed / count).astype(np.float32)
@@ -269,21 +321,27 @@ def main():
 
         # Metrics
         round_df = pd.DataFrame(subtomogram_rows)
-        # Save per-round detailed metrics
         round_df.to_csv(output_dir / f"metrics_details_round_{round_idx:02d}.csv", index=False)
-        
+
         change_row = reference_change_stats(current_reference, next_reference, round_idx)
         change_row.update({
-            "n_subtomograms": int(count),
-            "mean_runtime_s": float(round_df["runtime_s"].mean()),
-            "mean_ugw_dist": float(round_df["ugw_dist"].mean()),
-            "reference_path": str(reference_path),
+            "n_subtomograms":  int(n_aligned),
+            "n_accepted":      int(count),
+            "n_rejected":      int(len(rejected)),
+            "ugw_threshold":   ugw_threshold,
+            "mean_runtime_s":  float(round_df["runtime_s"].mean()),
+            "mean_ugw_dist":   float(round_df["ugw_dist"].mean()),
+            "mean_ugw_dist_accepted": float(
+                round_df.loc[round_df["accepted"], "ugw_dist"].mean()
+            ) if count > 0 else float("nan"),
+            "reference_path":  str(reference_path),
             "round_runtime_s": float(time.perf_counter() - round_start),
         })
         round_metrics.append(change_row)
 
         current_reference = next_reference
-        del reference_sampling_volume, pts_ref, sum_transformed, round_df, subtomogram_rows, next_reference
+        del reference_sampling_volume, pts_ref, sum_transformed, round_df, subtomogram_rows
+        del alignment_results, accepted, rejected, next_reference
         gc.collect()
         
         logger.info(f"Completed Round {round_idx} in {change_row['round_runtime_s']:.1f}s")

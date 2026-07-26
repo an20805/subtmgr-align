@@ -436,22 +436,21 @@ def ugw(x, y, z, x1, y1, z1, init=None, eps=2000,
                              nits_sinkhorn=100, tol_sinkhorn=1e-10):
     a = [1/len(x)] * len(x)
     b = [1/len(x1)] * len(x1)
-    n = len(x)
-    dx = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            dx[i][j] = (x[i] - x[j])**2 + (y[i] - y[j])**2 + (z[i] - z[j])**2
+    # Vectorized distance calculations
+    pts_ref = np.stack([x, y, z], axis=1)
+    pts_tgt = np.stack([x1, y1, z1], axis=1)
+    
+    dx = np.sum((pts_ref[:, None, :] - pts_ref[None, :, :]) ** 2, axis=-1)
+    dy = np.sum((pts_tgt[:, None, :] - pts_tgt[None, :, :]) ** 2, axis=-1)
 
-    n = len(x1)
-    dy = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            dy[i][j] = (x1[i] - x1[j])**2 + (y1[i] - y1[j])**2 + (z1[i] - z1[j])**2
-
-    a = torch.from_numpy(np.array(a))
-    b = torch.from_numpy(np.array(b))
-    dx = torch.from_numpy(np.array(dx))
-    dy = torch.from_numpy(np.array(dy))
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    a = torch.from_numpy(np.array(a)).to(device)
+    b = torch.from_numpy(np.array(b)).to(device)
+    dx = torch.from_numpy(np.array(dx)).to(device)
+    dy = torch.from_numpy(np.array(dy)).to(device)
+    
+    if init is not None and hasattr(init, 'to'):
+        init = init.to(device)
 
     pi, gamma = log_ugw_sinkhorn(a, dx, b, dy, init=init, eps=eps,
                                  rho=rho, rho2=rho2,
@@ -462,7 +461,7 @@ def ugw(x, y, z, x1, y1, z1, init=None, eps=2000,
     return pi, gamma, float(l2_distortion(pi, gamma, dx, dy))
 
 def build_coup(x, y, z, x1, y1, z1, pi, verbose=False):
-    res = np.array(pi)
+    res = pi.cpu().numpy() if hasattr(pi, 'cpu') else np.array(pi)
     all_coup = []
     for i in range(len(x1)):
         maxi = None
