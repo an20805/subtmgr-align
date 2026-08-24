@@ -15,10 +15,8 @@ To achieve near-atomic structural resolution, hundreds to thousands of 3D sub-vo
 
 ---
 
-## 2. Implemented Approaches
 ## 2. Active Development Focus & Implemented Approaches
 
-This repository contains two state-of-the-art Optimal Transport (OT) alignment frameworks:
 > [!IMPORTANT]
 > **Active Working Branch**: All current and upcoming development takes place on the **`dev` branch**. Previous experiments on $C_6$ multi-hypothesis (`feature/c6-multihypothesis`) have been concluded/deprecated.
 >
@@ -29,11 +27,6 @@ This repository contains two state-of-the-art Optimal Transport (OT) alignment f
 ### Repository Structure
 ```
 subtmgr-align/
-├── EMPOT/          # Unbalanced Gromov-Wasserstein (UGW) + Weighted Kabsch SVD
-├── alignOT/        # Entropic Optimal Transport (Sinkhorn) + Barycentric SGD on S³
-├── Data/           # Subtomogram datasets (0.1/Cluster_0/*.mrc) & references (0.mrc)
-├── scripts/        # Production runner scripts
-├── temp/           # Temporary outputs and ChimeraX-ready maps
 ├── alignOT/        # Entropic Optimal Transport (Sinkhorn) + Barycentric 1-NN SGD on S³ (GPU-Accelerated)
 ├── EMPOT/          # Unbalanced Gromov-Wasserstein (UGW) + Weighted Kabsch SVD (Historical OT Baseline)
 ├── eman2_baseline/ # Classical missing-wedge-aware STA baseline reference
@@ -43,18 +36,6 @@ subtmgr-align/
 └── .agents/        # Custom workspace skills (invert-mrc-density, etc.)
 ```
 
-### Approach A: EMPOT (Unbalanced Gromov-Wasserstein)
-- **Concept**: Formulates alignment as an Unbalanced Gromov-Wasserstein (UGW) problem comparing intra-cloud distance matrices.
-- **Orientation Recovery**: Uses weighted **Kabsch SVD** ($R = V U^T$) on the soft matching transport plan.
-- **Environment**: `/home/anshu/subtmgr-align/EMPOT/empot_env`
-- **Key Files**:
-  - `EMPOT/src/empot.py`: Core UGW solver.
-  - `EMPOT/src/run_iterative_alignment.py`: EMPOT iterative alignment pipeline.
-
----
-
-### Approach B: AlignOT (Entropic OT + Barycentric 1-NN SGD)
-- **Concept**: Formulates alignment directly on the unit quaternion manifold $S^3$.
 ### Approach: AlignOT (Entropic OT + Barycentric 1-NN SGD on S³)
 - **Concept**: Formulates 3D rotational alignment directly on the unit quaternion manifold $S^3$.
 - **Barycentric 1-NN SGD**:
@@ -68,9 +49,6 @@ subtmgr-align/
   - `alignOT/src/alignot_gpu_utils.py`: CUDA tensor math, batched Sinkhorn & GPU volume rotator.
   - `alignOT/src/alignot_utils.py`: Shared utilities (TRN sampling, I/O, metrics).
   - `alignOT/src/run_iterative_alignment_barycentric.py`: Reference CPU multi-core iterative alignment.
-  - `alignOT/src/run_iterative_alignment_gpu.py`: **Native GPU-Accelerated Pipeline**.
-  - `alignOT/src/alignot_gpu_utils.py`: CUDA tensor math & GPU volume rotator.
-  - `alignOT/src/alignot_utils.py`: Shared utilities (TRN sampling, I/O, metrics).
 
 ---
 
@@ -125,7 +103,6 @@ flowchart TD
 
 ## 5. Standard Execution Commands
 
-### Running GPU AlignOT
 ### Running GPU AlignOT (All Particles)
 ```bash
 # Run via wrapper script:
