@@ -28,6 +28,22 @@ from iterative_utils import (
     gaussian_lowpass_filter,
 )
 
+
+def rotate_pts_around_z(pts: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Rotate a (N,3) point cloud by angle_deg degrees around the Z axis.
+
+    Used for multi-hypothesis symmetry alignment: we rotate the reference
+    point cloud by each symmetry angle (0°, 60°, 120°, …) and pick the
+    rotation that gives the lowest UGW cost against the target.
+    """
+    theta = np.radians(angle_deg)
+    c, s = np.cos(theta), np.sin(theta)
+    Rz = np.array([[c, -s, 0.0],
+                   [s,  c, 0.0],
+                   [0.0, 0.0, 1.0]], dtype=np.float64)
+    return (pts.astype(np.float64) @ Rz.T).astype(pts.dtype)
+
+
 def setup_logger(log_file):
     logger = logging.getLogger("IterativeAlignment")
     logger.setLevel(logging.INFO)
@@ -90,8 +106,26 @@ def main():
              "0.33 = drop worst 33%% (EMAN2 aggressive). "
              "Rejected particles are still aligned and logged, just not averaged."
     )
+    parser.add_argument(
+        "--symmetry", type=str, default="C1",
+        help="Symmetry of the target molecule for multi-hypothesis alignment. "
+             "Accepted values: C1 (no symmetry, default), C2, C3, C4, C5, C6, C7, C8 … "
+             "For Cn symmetry the reference point cloud is rotated by k×(360/n)° "
+             "around Z for k=0…n-1; the rotation giving the lowest UGW distance is kept. "
+             "This resolves the n-fold alignment ambiguity (symmetry trap) at the cost "
+             "of n× more UGW evaluations per particle. "
+             "Example: --symmetry C6 for a hexameric ring."
+    )
 
     args = parser.parse_args()
+
+    # Parse symmetry order from e.g. 'C6' → 6
+    sym_str = args.symmetry.upper().strip()
+    if not sym_str.startswith("C") or not sym_str[1:].isdigit():
+        raise ValueError(f"--symmetry must be Cn (e.g. C1, C6). Got: {args.symmetry!r}")
+    symmetry_order = int(sym_str[1:])
+    if symmetry_order < 1:
+        raise ValueError(f"Symmetry order must be >= 1. Got: {symmetry_order}")
 
     # 1. Setup run folder
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -231,22 +265,47 @@ def main():
             )
             del vol_for_sampling, sampling_volume
 
-            # Align using EMPOT
-            try:
-                Abar, Bbar, R_recovered, dist = run_empot_alignment(
-                    pts_ref, pts_tgt,
-                    eps=args.eps,
-                    nits_plan=100, nits_sinkhorn=100
-                )
-            except Exception as e:
-                logger.error(f"Alignment failed for {path.name}: {e}")
+            # ── Multi-hypothesis alignment ────────────────────────────────
+            # For Cn symmetry: try all n rotations of pts_ref around Z
+            # (0°, 360/n°, 2×360/n°, …) and keep the best (lowest UGW dist).
+            # For C1 (no symmetry): a single alignment is run as before.
+            best_dist  = np.inf
+            best_Abar  = None
+            best_Bbar  = None
+            best_R     = None
+            best_hyp   = 0   # which hypothesis index won
+            any_succeeded = False
+
+            for hyp_k in range(symmetry_order):
+                angle_deg = hyp_k * (360.0 / symmetry_order)
+                pts_ref_hyp = rotate_pts_around_z(pts_ref, angle_deg) if hyp_k > 0 else pts_ref
+                try:
+                    Abar_k, Bbar_k, R_k, dist_k = run_empot_alignment(
+                        pts_ref_hyp, pts_tgt,
+                        eps=args.eps,
+                        nits_plan=100, nits_sinkhorn=100
+                    )
+                except Exception as e:
+                    logger.warning(f"  Hypothesis {hyp_k} failed for {path.name}: {e}")
+                    continue
+
+                any_succeeded = True
+                if dist_k < best_dist:
+                    best_dist = dist_k
+                    best_Abar = Abar_k
+                    best_Bbar = Bbar_k
+                    best_R    = R_k
+                    best_hyp  = hyp_k
+
+            if not any_succeeded:
+                logger.error(f"All {symmetry_order} hypotheses failed for {path.name}. Skipping.")
                 del volume, pts_tgt
                 continue
 
             del pts_tgt
 
-            # Transform the raw volume and store in memory
-            transformed_volume = apply_rigid_transform_to_volume(volume, R_recovered, Abar, Bbar)
+            # Transform using the best hypothesis and store in memory
+            transformed_volume = apply_rigid_transform_to_volume(volume, best_R, best_Abar, best_Bbar)
             del volume
 
             n_aligned += 1
@@ -255,8 +314,9 @@ def main():
             alignment_results.append({
                 "subtomogram_id":   int(path.stem),
                 "file_name":        path.name,
-                "ugw_dist":         float(dist),
-                "transformed_vol":  transformed_volume,   # kept in memory
+                "ugw_dist":         float(best_dist),
+                "best_hypothesis":  int(best_hyp),   # which C6 rotation won (0-based)
+                "transformed_vol":  transformed_volume,
                 "runtime_s":        float(runtime_s),
             })
 
@@ -304,12 +364,13 @@ def main():
         # ── Build per-round per-particle CSV rows ─────────────────────────────
         subtomogram_rows = [
             {
-                "round":          round_idx,
-                "subtomogram_id": res["subtomogram_id"],
-                "file_name":      res["file_name"],
-                "runtime_s":      res["runtime_s"],
-                "ugw_dist":       res["ugw_dist"],
-                "accepted":       id(res) in accepted_ids,
+                "round":           round_idx,
+                "subtomogram_id":  res["subtomogram_id"],
+                "file_name":       res["file_name"],
+                "runtime_s":       res["runtime_s"],
+                "ugw_dist":        res["ugw_dist"],
+                "best_hypothesis": res["best_hypothesis"],
+                "accepted":        id(res) in accepted_ids,
             }
             for res in alignment_results
         ]

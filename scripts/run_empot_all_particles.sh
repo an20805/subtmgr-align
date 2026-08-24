@@ -16,26 +16,29 @@ SCRIPT="${REPO}/EMPOT/src/run_iterative_alignment.py"
 
 CLUSTER_DIR="${REPO}/Data/0.1/Cluster_0" 
 OUTPUT_DIR="${REPO}/EMPOT/outputs/all_particles_runs"
+INIT_REF="${REPO}/Data/0.mrc"
 
 # Hyperparameters
-N_ROUNDS=5
+N_ROUNDS=1
 THRESHOLD=0.75
 NUM_POINTS=500
 LOWPASS_SIGMA=2
 EPS=10000
 SEED=42
-REJECTION_FRACTION=0.2   # drop worst 20% by UGW distance each round (0.0 = keep all)
+REJECTION_FRACTION=0.0   # drop worst 20% by UGW distance each round (0.0 = keep all)
+SYMMETRY=C1              # multi-hypothesis alignment: try all 6 C6 rotations of ref per particle
 
 echo "================================================================"
-echo " EMPOT iterative alignment — ALL 200 subtomograms"
+echo " EMPOT iterative alignment — ALL 200 subtomograms with true sructure "
 echo "================================================================"
 echo "  Cluster dir : ${CLUSTER_DIR}"
-echo "  Init ref    : (none — computed from all 200 subtomograms)"
+echo "  Init ref    : ${INIT_REF}"
 echo "  Rounds      : ${N_ROUNDS}"
 echo "  Threshold   : ${THRESHOLD}"
 echo "  Points      : ${NUM_POINTS}"
 echo "  Lowpass σ   : ${LOWPASS_SIGMA} vox"
 echo "  Rejection   : ${REJECTION_FRACTION} (worst fraction dropped per round)"
+echo "  Symmetry    : ${SYMMETRY} (multi-hypothesis alignment)"
 echo "  Output dir  : ${OUTPUT_DIR}"
 echo "================================================================"
 
@@ -44,12 +47,14 @@ mkdir -p "${OUTPUT_DIR}"
 "${PYTHON}" "${SCRIPT}" \
     --cluster_dir      "${CLUSTER_DIR}" \
     --output_base_dir  "${OUTPUT_DIR}" \
+    --init_reference   "${INIT_REF}" \
     --selection_mode   "all" \
     --n_rounds         "${N_ROUNDS}" \
     --threshold        "${THRESHOLD}" \
     --num_points       "${NUM_POINTS}" \
     --lowpass_sigma       "${LOWPASS_SIGMA}" \
     --rejection_fraction  "${REJECTION_FRACTION}" \
+    --symmetry            "${SYMMETRY}" \
     --eps                 "${EPS}" \
     --seed                "${SEED}"
 

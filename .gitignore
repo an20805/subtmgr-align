@@ -47,6 +47,7 @@ alignOT/Data/
 BOTalign/data/
 EMPOT/sample-data/
 papers/
+temp/
 
 # =============================================================================
 # Experiment outputs — track config + logs + CSVs + PNGs, NOT volumes
@@ -86,6 +87,8 @@ Thumbs.db
 .vscode/
 .claude/
 .idea/
+*Zone.Identifier
+*:Zone.Identifier
 
 # EMAN2 logs
 .eman2log.txt
@@ -101,6 +104,7 @@ logs/
 
 # Scratch / temp
 scratch/
+scratch.py
 tmp/
 *.tmp
 *.bak
@@ -110,6 +114,7 @@ tmp/
 # =============================================================================
 # EMPOT old run outputs (superseded by experiments/)
 EMPOT/outputs/
+alignOT/outputs/
 
 # EMAN2 intermediate processing output
 eman2_baseline/sptsgd/
