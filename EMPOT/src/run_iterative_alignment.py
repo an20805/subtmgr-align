@@ -13,6 +13,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+os.environ["TZ"] = "Asia/Kolkata"
+if hasattr(time, "tzset"):
+    time.tzset()
+
+
 # Import the utility functions
 from iterative_utils import (
     get_cluster_paths,

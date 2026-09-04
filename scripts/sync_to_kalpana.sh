@@ -25,6 +25,9 @@ rsync -avz \
     --exclude 'eman2_baseline/' \
     --exclude 'EMPOT/outputs/' \
     --exclude 'papers/' \
+    --exclude 'Data/' \
+    --exclude 'alignOT/outputs/' \
+    --exclude 'alignOT/alignot_env/' \
     ./ ${SERVER}:${REMOTE_DIR}
 
 echo "------------------------------------------------------"

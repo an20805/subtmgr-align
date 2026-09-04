@@ -20,11 +20,11 @@ CLUSTER_DIR="${REPO}/Data/0.1/Cluster_0"
 OUTPUT_DIR="${REPO}/alignOT/outputs/gpu_runs"
 
 # ── Alignment loop & Reference ────────────────────────────────────────────────
-N_ROUNDS=3
+N_ROUNDS=10
 INIT_REFERENCE=""   # Set to initial reference MRC ${REPO}/Data/0.mrc , or leave empty to compute streaming average
 
 # ── Particle selection ────────────────────────────────────────────────────────
-SELECTION_MODE=all      # all | first | random | even | odd
+SELECTION_MODE=odd      # all | first | random | even | odd
 # N_SBTMS=40           # uncomment and set --n_sbtms below if using first/random
 
 # ── Sampling ──────────────────────────────────────────────────────────────────
@@ -34,6 +34,9 @@ LOWPASS_SIGMA=2.0       # Gaussian LP sigma (voxels) before sampling only; set t
 
 # ── AlignOT SGD Hyperparameters ───────────────────────────────────────────────
 REG=100                 # Sinkhorn entropic regularization
+SINKHORN_ITERS=50       # Sinkhorn scaling iterations per SGD step
+COST_METRIC="l2_sq"        # Ground distance cost metric: "l2_sq", "l1", or "l2"
+TARGET_MODE="base"      # Target point selection: "base" (argmax) or "barycentric" (1-NN)
 SGD_ITERS=500           # SGD iterations per particle
 SGD_LR=0.001            # Learning rate
 
@@ -50,6 +53,8 @@ echo "Python Interpreter: ${PYTHON}"
 echo "Script            : ${SCRIPT}"
 echo "Subtomograms Dir  : ${CLUSTER_DIR}"
 echo "Output Base Dir   : ${OUTPUT_DIR}"
+echo "Cost Metric       : ${COST_METRIC}"
+echo "Target Mode       : ${TARGET_MODE}"
 echo "CPU Workers       : ${NUM_WORKERS}"
 echo "Device            : ${DEVICE}"
 echo "======================================================================"
@@ -64,6 +69,9 @@ ARGS=(
     --threshold           "${THRESHOLD}"
     --lowpass_sigma       "${LOWPASS_SIGMA}"
     --reg                 "${REG}"
+    --sinkhorn_iters      "${SINKHORN_ITERS}"
+    --cost_metric         "${COST_METRIC}"
+    --target_mode         "${TARGET_MODE}"
     --sgd_iters           "${SGD_ITERS}"
     --sgd_lr              "${SGD_LR}"
     --device              "${DEVICE}"

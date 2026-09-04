@@ -161,6 +161,12 @@ def parse_args():
                    help="SGD iterations per particle (default: 500)")
     p.add_argument("--sgd_lr", type=float, default=0.001,
                    help="SGD learning rate (default: 0.001)")
+    p.add_argument("--sinkhorn_iters", type=int, default=15,
+                   help="Sinkhorn scaling iterations per SGD step (default: 15)")
+    p.add_argument("--cost_metric", type=str, default="l2_sq", choices=["l2_sq", "l1", "l2"],
+                   help="Ground distance cost metric in OT and SGD: 'l2_sq' (default), 'l1', or 'l2'")
+    p.add_argument("--target_mode", type=str, default="barycentric", choices=["barycentric", "base", "argmax"],
+                   help="Target point selection mode: 'barycentric' (default, 1-NN barycentric projection) or 'base' / 'argmax' (hard argmax on transport plan)")
 
     # Misc
     p.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
@@ -180,12 +186,14 @@ def main():
 
     # ── Output directory & logger ──────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"run_{timestamp}_{args.selection_mode}_gpu_barycentric"
+    metric_suffix = f"_{args.cost_metric}" if args.cost_metric != "l2_sq" else ""
+    mode_label = "argmax" if args.target_mode in ("base", "argmax") else "barycentric"
+    run_name = f"run_{timestamp}_{args.selection_mode}_gpu_{mode_label}{metric_suffix}"
     output_dir = Path(args.output_base_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger = setup_logger(output_dir / "run.log")
-    logger.info("Starting AlignOT Native GPU Barycentric 1-NN Iterative Subtomogram Alignment")
+    logger.info(f"Starting AlignOT Native GPU Iterative Subtomogram Alignment [Target Mode: {args.target_mode}, Cost Metric: {args.cost_metric}]")
     logger.info(f"Target GPU   : {device} ({torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'})")
     logger.info(f"TRN Workers  : {args.num_workers} parallel sampling processes")
     logger.info(f"Run directory: {output_dir.resolve()}")
@@ -282,8 +290,8 @@ def main():
         # 3. Stack Batched Source Clouds for GPU Alignment
         src_b_np = np.stack([item["src_xyz"] for item in sampled_items], axis=0)  # (N_particles, 500, 3)
 
-        # 4. Native GPU Batched Barycentric 1-NN SGD
-        logger.info(f"Running Native GPU Batched Barycentric SGD on {n_actual} particles...")
+        # 4. Native GPU Batched SGD (Barycentric or Base Argmax)
+        logger.info(f"Running Native GPU Batched SGD ({args.target_mode}) on {n_actual} particles...")
         t0_gpu_sgd = time.perf_counter()
         quats_gpu, costs_gpu = gpu_utils.SGD_barycentric_gpu_batched(
             src_b_np,
@@ -291,6 +299,9 @@ def main():
             lr=args.sgd_lr,
             max_iter=args.sgd_iters,
             reg=args.reg,
+            sinkhorn_iters=args.sinkhorn_iters,
+            cost_metric=args.cost_metric,
+            target_mode=args.target_mode,
             seed=args.seed + round_idx * 1000,
             device=device,
         )
@@ -304,22 +315,34 @@ def main():
         sum_rotated_gpu = torch.zeros((box_size, box_size, box_size), dtype=torch.float64, device=device)
 
         alignment_results = []
-        for i, item in enumerate(sampled_items):
+        progress_every = max(1, n_actual // 10)
+
+        for item_idx, item in enumerate(sampled_items, start=1):
+            subtomogram_start = time.perf_counter()
             vol_np = item["volume"]
             Bbar = item["Bbar"]
-            q = quats_gpu[i]
-            cost = costs_gpu[i]
+            q = quats_gpu[item_idx - 1]
+            cost = costs_gpu[item_idx - 1]
 
             rot_vol_gpu = gpu_rotator.rotate_volume(vol_np, q, Bbar, Abar)
             sum_rotated_gpu += rot_vol_gpu.double()
+
+            runtime_s = float(t_gpu_sgd / n_actual) + (time.perf_counter() - subtomogram_start)
 
             alignment_results.append({
                 "subtomogram_id": item["subtomogram_id"],
                 "file_name": item["file_name"],
                 "wass_dist": float(cost),
-                "runtime_s": float(t_gpu_sgd / n_actual),
+                "runtime_s": float(runtime_s),
                 "q": [float(v) for v in q],
             })
+
+            if item_idx % progress_every == 0 or item_idx == n_actual:
+                logger.info(
+                    f"  Round {round_idx}: aligned {item_idx}/{n_actual} "
+                    f"({runtime_s:.2f}s) — WassDist={float(cost):.2f}"
+                )
+
             del vol_np, rot_vol_gpu
 
         torch.cuda.synchronize()
@@ -356,6 +379,9 @@ def main():
         round_df = pd.DataFrame(particle_rows)
         round_df.to_csv(
             output_dir / f"metrics_particles_round_{round_idx:02d}.csv", index=False
+        )
+        round_df.to_csv(
+            output_dir / "quaternions.csv", index=False
         )
 
         # 8. Round-level metrics
@@ -409,7 +435,7 @@ def main():
     # Combined slice grid across all rounds
     params_label = (
         f"M={args.num_points}, σ_LP={args.lowpass_sigma}, thr={args.threshold}, "
-        f"reg={args.reg}, iters={args.sgd_iters}, lr={args.sgd_lr} (Native GPU Barycentric 1-NN)"
+        f"reg={args.reg}, cost={args.cost_metric}, sink_iters={args.sinkhorn_iters}, iters={args.sgd_iters}, lr={args.sgd_lr} (Native GPU Barycentric 1-NN)"
     )
     combined = alignot_utils.make_combined_plot(all_references, params_label, output_dir)
     logger.info(f"Saved combined slices to {combined}")
