@@ -38,7 +38,7 @@ WEDGE_MASK="${REPO}/Data/wedge_mask.mrc"              # e.g. "${REPO}/Data/wedge
 # Dilation in voxels for the soft protein mask around current reference.
 # Set to 0 to disable reference masking. Default: 8
 MASK_DILATION="${6:-8}"
-MASK_THRESHOLD="0.55"
+MASK_THRESHOLD="-0.15"
 
 mkdir -p "${OUTPUT_DIR}"
 

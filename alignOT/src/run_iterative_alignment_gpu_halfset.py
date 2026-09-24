@@ -144,6 +144,12 @@ def _rotate_mask_cpu(q_inv: np.ndarray, mask: np.ndarray) -> np.ndarray:
     In scipy's convention:
         out[o] = in[matrix @ o + offset]
 
+    To rotate the mask by q_inv (= reverse of forward alignment rotation q):
+        R_xyz_inv = quaternion_to_R(q_inv)
+        R_zyx_inv = P @ R_xyz_inv @ P^T   (convert to [z,y,x] voxel frame)
+        offset     = center - R_zyx_inv @ center   (rotation around box center)
+
+    This exactly mirrors the GPUVolumeRotator formula with Bbar=Abar=0.
     Therefore, `matrix` must be the coordinate map R_inv = R_zyx_inv.T.
     """
     from scipy.ndimage import affine_transform
@@ -165,7 +171,7 @@ def _rotate_mask_cpu(q_inv: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 def build_reference_mask(
     ref_vol: np.ndarray,
-    mask_threshold: float = 0.55,
+    mask_threshold: float = -0.15,
     dilation_vox: int = 8,
     taper_sigma: float = 3.0,
 ) -> np.ndarray:
@@ -176,24 +182,34 @@ def build_reference_mask(
     ----------
     ref_vol : (D, H, W) float32 reference volume
     mask_threshold : float
-        If > 0, evaluated on prepare_sampling_volume(ref_vol) (signal > threshold).
-        If <= 0, evaluated on low-pass filtered raw ref_vol (dark density < threshold).
+        If <= 0, evaluated directly on Gaussian lowpass-filtered raw ref_vol
+        (signal is dark / negative density: ref_vol < mask_threshold).
+        If > 0, evaluated on prepare_sampling_volume(ref_vol) (signal > mask_threshold).
+        Recommended: -0.15 to -0.20 for raw cryo-ET subtomogram averages.
     dilation_vox : int
         Number of voxels to dilate the binary mask beyond the protein boundary.
     taper_sigma : float
         Gaussian filter standard deviation in voxels for soft edge falloff.
+
+    Returns
+    -------
+    mask : (D, H, W) float32 ndarray with values in [0, 1].
     """
-    from scipy.ndimage import distance_transform_edt, gaussian_filter
+    from scipy.ndimage import binary_fill_holes, distance_transform_edt, gaussian_filter
+
     if 0.0 < mask_threshold <= 1.0:
         prep = alignot_utils.prepare_sampling_volume(ref_vol, sigma=2.0)
-        binary = (prep > mask_threshold).astype(np.float32)
+        binary = (prep > mask_threshold)
     else:
         v_lp = alignot_utils.gaussian_lowpass_filter(ref_vol, sigma=2.0)
-        binary = (v_lp < mask_threshold).astype(np.float32)
+        binary = (v_lp < mask_threshold)
+
+    # Fill internal holes (e.g. cavity) so the entire protein barrel is solid
+    binary = binary_fill_holes(binary)
 
     # EDT of complement gives distance from protein boundary
-    dist_outside = distance_transform_edt(1.0 - binary)
-    dilated = ((binary > 0.5) | (dist_outside <= dilation_vox)).astype(np.float32)
+    dist_outside = distance_transform_edt(~binary)
+    dilated = (binary | (dist_outside <= dilation_vox)).astype(np.float32)
     soft = gaussian_filter(dilated.astype(np.float64), sigma=taper_sigma)
     return np.clip(soft, 0.0, 1.0).astype(np.float32)
 
@@ -985,11 +1001,11 @@ def main():
         ),
     )
     parser.add_argument(
-        "--mask_threshold", type=float, default=0.55,
+        "--mask_threshold", type=float, default=-0.15,
         help=(
-            "Threshold for defining protein envelope in reference mask (default: 0.55). "
-            "If in (0, 1], evaluated on normalized inverted density (> threshold). "
-            "If <= 0, evaluated on raw density (< threshold)."
+            "Threshold for defining protein envelope in reference mask (default: -0.15). "
+            "If <= 0, evaluated directly on raw lowpass density (< threshold). "
+            "If in (0, 1], evaluated on normalized inverted density (> threshold)."
         ),
     )
 
