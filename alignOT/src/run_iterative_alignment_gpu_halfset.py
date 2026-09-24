@@ -304,6 +304,8 @@ def resolution_at_threshold(shell_centers: np.ndarray, fsc_values: np.ndarray,
             else:
                 freq = f1 + (threshold - v1) * (f2 - f1) / (v2 - v1)
             return float(apix / freq) if freq > 0 else None
+        elif v1 < threshold and i == 0:
+            return float(apix / f1) if f1 > 0 else None
 
     if fsc_values[-1] >= threshold:
         return float(apix / shell_centers[-1])
