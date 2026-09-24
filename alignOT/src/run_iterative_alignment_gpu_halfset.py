@@ -304,8 +304,6 @@ def resolution_at_threshold(shell_centers: np.ndarray, fsc_values: np.ndarray,
             else:
                 freq = f1 + (threshold - v1) * (f2 - f1) / (v2 - v1)
             return float(apix / freq) if freq > 0 else None
-        elif v1 < threshold and i == 0:
-            return float(apix / f1) if f1 > 0 else None
 
     if fsc_values[-1] >= threshold:
         return float(apix / shell_centers[-1])
@@ -482,13 +480,25 @@ def run_half_set_round_gpu(
     args: argparse.Namespace,
     device: torch.device,
     gpu_rotator: gpu_utils.GPUVolumeRotator,
-    logger: logging.Logger
+    logger: logging.Logger,
+    wedge_mask_gpu: Optional[torch.Tensor] = None,
 ) -> Tuple[np.ndarray, dict, list]:
+    """
+    One round of AlignOT alignment for a single half-set.
+
+    wedge_mask_gpu : (D, H, W) bool/float tensor on `device`, or None.
+        When provided, volume accumulation is done in Fourier space with
+        per-particle rotated wedge masks — the Fourier-space masked average.
+        When None (default), the original real-space running sum is used,
+        preserving exact backward compatibility.
+    """
     t0_half = time.perf_counter()
     n_actual = len(cluster_paths)
     box_size = current_reference.shape[0]
+    use_wedge = wedge_mask_gpu is not None
 
-    logger.info(f"--- [{half_name.upper()} HALF] Round {round_idx:02d} Starting ({n_actual} particles, device: {device}) ---")
+    avg_mode = "Fourier-space wedge-masked" if use_wedge else "real-space sum"
+    logger.info(f"--- [{half_name.upper()} HALF] Round {round_idx:02d} Starting ({n_actual} particles, device: {device}, avg: {avg_mode}) ---")
 
     # 1. Sample Reference Point Cloud via TRN
     t0_ref_trn = time.perf_counter()
@@ -544,39 +554,112 @@ def run_half_set_round_gpu(
 
     # 5. GPU 3D Volume Rigid Transformation & Accumulation
     t0_gpu_rot = time.perf_counter()
-    sum_rotated_gpu = torch.zeros((box_size, box_size, box_size), dtype=torch.float64, device=device)
     alignment_results = []
 
-    for item_idx, item in enumerate(sampled_items, start=1):
-        vol_np = item["volume"]
-        Bbar = item["Bbar"]
-        q = quats_gpu[item_idx - 1]
-        cost = float(costs_gpu[item_idx - 1])
+    if use_wedge:
+        # ── Fourier-space masked average (wedge-aware) ───────────────────────
+        # Accumulators in Fourier space (centered DC coordinates matching wedge_mask):
+        #   F_sum[k]  = Σ_i  M_i(k) · F_i(k)   (weighted Fourier coefficients)
+        #   W_sum[k]  = Σ_i  M_i(k)             (total weight at each frequency)
+        #
+        # In wedge_mask.mrc, DC (k=0) is at the volume center [box_size//2, ...].
+        # torch.fft.fftn produces unshifted FFT with DC at [0, 0, 0].
+        # We use torch.fft.fftshift so F_i matches the centered wedge_mask.
+        #
+        # To rotate the mask around its center, Bbar_mask must be [0, 0, 0]
+        # (in centered TRN coords, offset = center - R_inv @ center).
+        F_sum = torch.zeros(
+            (box_size, box_size, box_size), dtype=torch.complex128, device=device
+        )
+        W_sum = torch.zeros(
+            (box_size, box_size, box_size), dtype=torch.float64, device=device
+        )
+        Bbar_mask = np.zeros(3, dtype=np.float64)
 
-        rot_vol_gpu = gpu_rotator.rotate_volume(vol_np, q, Bbar, Abar)
-        sum_rotated_gpu += rot_vol_gpu.double()
+        for item_idx, item in enumerate(sampled_items, start=1):
+            vol_np = item["volume"]
+            Bbar   = item["Bbar"]
+            q      = quats_gpu[item_idx - 1]
+            cost   = float(costs_gpu[item_idx - 1])
 
-        alignment_results.append({
-            "index": item_idx - 1,
-            "subtomogram_id": item["subtomogram_id"],
-            "file_name": item["file_name"],
-            "wass_dist": cost,
-            "q_w": float(q[0]),
-            "q_x": float(q[1]),
-            "q_y": float(q[2]),
-            "q_z": float(q[3]),
-        })
-        del vol_np, rot_vol_gpu
+            # 1. Rotate volume in real space (same as original path)
+            rot_vol = gpu_rotator.rotate_volume(vol_np, q, Bbar, Abar)  # (D, H, W), float32
 
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    t_gpu_rot = time.perf_counter() - t0_gpu_rot
+            # 2. Rotate wedge mask around center on GPU
+            rot_mask_f = gpu_rotator.rotate_volume(
+                wedge_mask_gpu, q, Bbar_mask, Bbar_mask
+            ).double()  # (D, H, W), float64
+            rot_mask = (rot_mask_f >= 0.5).double()
 
-    # 6. Build new half reference
-    new_reference = (sum_rotated_gpu / float(n_actual)).float().cpu().numpy()
-    del sum_rotated_gpu, sampled_items, src_b_np
+            # 3. FFT of rotated volume, shifted so DC is at the center
+            F_i = torch.fft.fftshift(torch.fft.fftn(rot_vol.double()))  # complex128
+
+            # 4. Accumulate in Fourier space
+            F_sum += rot_mask * F_i
+            W_sum += rot_mask
+
+            alignment_results.append({
+                "index": item_idx - 1,
+                "subtomogram_id": item["subtomogram_id"],
+                "file_name": item["file_name"],
+                "wass_dist": cost,
+                "q_w": float(q[0]), "q_x": float(q[1]),
+                "q_y": float(q[2]), "q_z": float(q[3]),
+            })
+            del vol_np, rot_vol, rot_mask_f, rot_mask, F_i
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t_gpu_rot = time.perf_counter() - t0_gpu_rot
+
+        # 6. Reconstruct reference from weighted Fourier average
+        # Divide F_sum / W_sum where at least one particle measured that frequency
+        mask_measured = W_sum > 0.5
+        F_avg = torch.zeros_like(F_sum)
+        F_avg[mask_measured] = F_sum[mask_measured] / W_sum[mask_measured]
+
+        # Shift back from center to standard FFT layout and IFFT to real space
+        new_reference_t = torch.fft.ifftn(torch.fft.ifftshift(F_avg)).real.float()
+        new_reference = new_reference_t.cpu().numpy()
+        del F_sum, W_sum, mask_measured, F_avg, new_reference_t
+
+    else:
+        # ── Original real-space running sum (backward-compatible) ────────────
+        sum_rotated_gpu = torch.zeros(
+            (box_size, box_size, box_size), dtype=torch.float64, device=device
+        )
+
+        for item_idx, item in enumerate(sampled_items, start=1):
+            vol_np = item["volume"]
+            Bbar   = item["Bbar"]
+            q      = quats_gpu[item_idx - 1]
+            cost   = float(costs_gpu[item_idx - 1])
+
+            rot_vol_gpu = gpu_rotator.rotate_volume(vol_np, q, Bbar, Abar)
+            sum_rotated_gpu += rot_vol_gpu.double()
+
+            alignment_results.append({
+                "index": item_idx - 1,
+                "subtomogram_id": item["subtomogram_id"],
+                "file_name": item["file_name"],
+                "wass_dist": cost,
+                "q_w": float(q[0]), "q_x": float(q[1]),
+                "q_y": float(q[2]), "q_z": float(q[3]),
+            })
+            del vol_np, rot_vol_gpu
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t_gpu_rot = time.perf_counter() - t0_gpu_rot
+
+        # 6. Build new half reference
+        new_reference = (sum_rotated_gpu / float(n_actual)).float().cpu().numpy()
+        del sum_rotated_gpu
+
+    del sampled_items, src_b_np
     if device.type == "cuda":
         torch.cuda.empty_cache()
+
 
     total_half_time = time.perf_counter() - t0_half
     mean_cost = float(np.mean([r["wass_dist"] for r in alignment_results]))
@@ -734,6 +817,18 @@ def main():
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: 42)")
 
+    # Fourier-space wedge-masked averaging (optional — off by default)
+    parser.add_argument(
+        "--wedge_mask", type=str, default=None,
+        help=(
+            "Path to a binary Fourier-space wedge mask (.mrc, same box size as subtomograms). "
+            "When supplied, volume accumulation switches from real-space sum to a Fourier-space "
+            "weighted average: each Fourier coefficient is weighted by the rotated per-particle "
+            "wedge mask, suppressing missing-wedge artifacts in the reference. "
+            "When omitted (default), the original real-space averaging is used unchanged."
+        ),
+    )
+
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -756,7 +851,8 @@ def main():
     if args.run_name:
         run_dir_name = f"run_{timestamp}_{args.run_name}"
     else:
-        run_dir_name = f"run_{timestamp}{snr_tag}_alignot_{args.n_rounds}rounds_gpu_{mode_label}{metric_suffix}"
+        wedge_suffix = "_wedge" if args.wedge_mask is not None else ""
+        run_dir_name = f"run_{timestamp}{snr_tag}_alignot_{args.n_rounds}rounds_gpu_{mode_label}{metric_suffix}{wedge_suffix}"
 
     run_dir = Path(args.output_base_dir) / run_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -780,6 +876,28 @@ def main():
     logger.info(f"Pixel Size      : {args.apix} Å")
     logger.info(f"Device          : {device} ({torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'})")
     logger.info(f"TRN Workers     : {args.num_workers}")
+
+    # Load wedge mask (optional). Must match the subtomogram box size.
+    wedge_mask_gpu: Optional[torch.Tensor] = None
+    if args.wedge_mask is not None:
+        import mrcfile as _mrcfile
+        logger.info(f"Wedge Mask Path : {args.wedge_mask}")
+        with _mrcfile.open(args.wedge_mask, permissive=True) as _mf:
+            _mask_np = _mf.data.astype(np.float32)
+        # Validate shape — must be (D, H, W) with D = H = W = box_size (91)
+        if _mask_np.ndim != 3:
+            logger.error(f"Wedge mask must be 3D; got shape {_mask_np.shape}. Aborting.")
+            sys.exit(1)
+        wedge_mask_gpu = torch.from_numpy(_mask_np).to(device)
+        n_ones  = int((wedge_mask_gpu >= 0.5).sum().item())
+        n_total = wedge_mask_gpu.numel()
+        logger.info(
+            f"Wedge Mask Shape: {tuple(wedge_mask_gpu.shape)}  "
+            f"Fill: {n_ones}/{n_total} = {100*n_ones/n_total:.1f}%  "
+            f"(averaging: Fourier-space wedge-masked)"
+        )
+    else:
+        logger.info("Wedge Mask      : None  (averaging: real-space sum — original mode)")
 
     # Hardware Info
     sys_info = get_system_info(args.num_workers, device)
@@ -892,7 +1010,8 @@ def main():
             args=args,
             device=device,
             gpu_rotator=gpu_rotator,
-            logger=logger
+            logger=logger,
+            wedge_mask_gpu=wedge_mask_gpu,
         )
 
         # Align Odd Half
@@ -905,7 +1024,8 @@ def main():
             args=args,
             device=device,
             gpu_rotator=gpu_rotator,
-            logger=logger
+            logger=logger,
+            wedge_mask_gpu=wedge_mask_gpu,
         )
 
         # ── Inter-Half-Set Alignment (even_ref → odd_ref) ────────────────

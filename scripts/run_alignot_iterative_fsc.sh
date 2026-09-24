@@ -1,85 +1,89 @@
-#!/usr/bin/env bash
-# run_alignot_iterative_fsc.sh
-#
-# Gold-standard iterative AlignOT alignment:
-#   1. Run AlignOT iterative on even particles  → even references (rounds 0-N)
-#   2. Run AlignOT iterative on odd  particles  → odd  references (rounds 0-N)
-#   3. For each round: compute FSC(even_ref, odd_ref) and plot overall average slices
-#
-# Output: experiments/alignot_iterative_fsc/multi_round_evolution.png
-#
 set -euo pipefail
+export TZ="Asia/Kolkata"
 
-REPO=/home/anshu/subtmgr-align
-PYTHON="${REPO}/EMPOT/empot/bin/python3"
-SCRIPT_DIR="${REPO}/scripts"
-SRC_DIR="${REPO}/alignOT/src"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
 
-# ── data ────────────────────────────────────────────────────────────────────────
-CLUSTER_DIR="${REPO}/Subtomograms_40_deg_uniform/0.1/Cluster_0"
-OUTPUT_BASE="${REPO}/EMPOT/outputs/alignot_runs"
+PYTHON="${REPO}/alignOT/alignot_env/bin/python"
+SCRIPT="${REPO}/alignOT/src/run_iterative_alignment_gpu_halfset.py"
 
-# ── hyperparameters ──────────────────────────────────────────────────────────────
-N_ROUNDS=3
-THRESHOLD=0.7      # darkest ~1% of voxels = protein signal
-NUM_POINTS=500
-LR=1e-5            # quaternion SGD learning rate (matches AlignOT notebook)
-MAX_ITER=200       # SGD iterations per subtomogram
-REG=30             # Sinkhorn regularisation (matches AlignOT notebook)
+# ── Configuration & Defaults (matching run_alignot_gpu.sh) ────────────────────
+DATA_DIR="${1:-${REPO}/Data/0.1/subtomograms/0}"
+OUTPUT_DIR="${REPO}/alignOT/outputs/gpu_runs"
+N_ROUNDS="${2:-7}"
+NUM_WORKERS="${3:-16}"
+LIMIT="${4:--1}"
+INIT_REFERENCE="${5:-}"    # Set path to initial reference, or leave empty for reference-free raw average
 
-# ── output ───────────────────────────────────────────────────────────────────────
-FSC_OUT="${REPO}/experiments/alignot_iterative_fsc"
-APIX=4.0
+# ── AlignOT GPU Parameters ───────────────────────────────────────────────────
+TARGET_MODE="base"         # "base" (argmax) or "barycentric" (1-NN)
+COST_METRIC="l2_sq"        # "l2_sq", "l1", or "l2"
+REG=100.0                  # Sinkhorn entropic regularisation
+SINKHORN_ITERS=50          # Sinkhorn scaling iterations
+SGD_ITERS=1000              # SGD iterations per particle
+SGD_LR=0.001               # SGD learning rate
+NUM_POINTS=500             # TRN points per volume
+THRESHOLD=0.7              # Density threshold after inversion
+LOWPASS_SIGMA=2.0          # Gaussian LP sigma (voxels) before sampling only
+APIX=4.0                   # Voxel size in Angstroms
+DEVICE="cuda"              # GPU device
+SEED=42
 
-log() { echo "[$(date '+%H:%M:%S')] $*"; }
+# ── Wedge-Mask Averaging (optional) ─────────────────────────────────────────
+# Leave empty for the original real-space sum (default / backward-compatible).
+# Set to the path of wedge_mask.mrc to enable Fourier-space wedge-masked averaging.
+WEDGE_MASK="${REPO}/Data/wedge_mask.mrc"              # e.g. "${REPO}/Data/wedge_mask.mrc"
 
-log "=== AlignOT Iterative FSC Pipeline ==="
-log "N_ROUNDS : ${N_ROUNDS}   LR: ${LR}   MAX_ITER: ${MAX_ITER}   REG: ${REG}"
-log "Threshold: ${THRESHOLD}  NUM_POINTS: ${NUM_POINTS}"
+mkdir -p "${OUTPUT_DIR}"
 
-# ── Step 1: align even half-set ──────────────────────────────────────────────────
-log "--- Step 1: AlignOT on EVEN half-set ---"
-"${PYTHON}" "${SRC_DIR}/run_alignot_iterative.py" \
-    --cluster_dir       "${CLUSTER_DIR}" \
-    --output_base_dir   "${OUTPUT_BASE}" \
-    --selection_mode    even \
-    --n_rounds          "${N_ROUNDS}" \
-    --threshold         "${THRESHOLD}" \
-    --num_points        "${NUM_POINTS}" \
-    --lr                "${LR}" \
-    --max_iter          "${MAX_ITER}" \
-    --reg               "${REG}"
+echo "======================================================================"
+echo "Starting AlignOT Native GPU Gold-Standard Iterative Alignment"
+echo "======================================================================"
+echo "Python Interpreter: ${PYTHON}"
+echo "Script            : ${SCRIPT}"
+echo "Data Directory    : ${DATA_DIR}"
+echo "Output Directory  : ${OUTPUT_DIR}"
+echo "Rounds            : ${N_ROUNDS}"
+echo "Target Mode       : ${TARGET_MODE} (argmax)"
+echo "Cost Metric       : ${COST_METRIC}"
+echo "Sinkhorn Iters    : ${SINKHORN_ITERS} (reg=${REG})"
+echo "SGD Iters / LR    : ${SGD_ITERS} / ${SGD_LR}"
+echo "TRN Points / LP   : ${NUM_POINTS} / σ=${LOWPASS_SIGMA} vox"
+echo "Device            : ${DEVICE}"
+echo "TRN CPU Workers   : ${NUM_WORKERS}"
+echo "Pixel Size        : ${APIX} Å"
+echo "Subtomogram Limit : ${LIMIT}"
+echo "Initial Reference : ${INIT_REFERENCE:-[Reference-Free Unaligned Seed]}"
+echo "Wedge Mask        : ${WEDGE_MASK:-[None — real-space sum]}"
+echo "======================================================================"
 
-EVEN_RUN=$(ls -td "${OUTPUT_BASE}"/run_*_even | head -1)
-log "Even run dir: ${EVEN_RUN}"
+CMD=(
+    "$PYTHON" "$SCRIPT"
+    --cluster_dir       "$DATA_DIR"
+    --output_base_dir   "$OUTPUT_DIR"
+    --n_rounds          "$N_ROUNDS"
+    --num_workers       "$NUM_WORKERS"
+    --target_mode       "$TARGET_MODE"
+    --cost_metric       "$COST_METRIC"
+    --reg               "$REG"
+    --sinkhorn_iters    "$SINKHORN_ITERS"
+    --sgd_iters         "$SGD_ITERS"
+    --sgd_lr            "$SGD_LR"
+    --num_points        "$NUM_POINTS"
+    --threshold         "$THRESHOLD"
+    --lowpass_sigma     "$LOWPASS_SIGMA"
+    --apix              "$APIX"
+    --device            "$DEVICE"
+    --seed              "$SEED"
+    --n_sbtms           "$LIMIT"
+)
 
-# ── Step 2: align odd half-set ───────────────────────────────────────────────────
-log "--- Step 2: AlignOT on ODD half-set ---"
-"${PYTHON}" "${SRC_DIR}/run_alignot_iterative.py" \
-    --cluster_dir       "${CLUSTER_DIR}" \
-    --output_base_dir   "${OUTPUT_BASE}" \
-    --selection_mode    odd \
-    --n_rounds          "${N_ROUNDS}" \
-    --threshold         "${THRESHOLD}" \
-    --num_points        "${NUM_POINTS}" \
-    --lr                "${LR}" \
-    --max_iter          "${MAX_ITER}" \
-    --reg               "${REG}"
+if [[ -n "$INIT_REFERENCE" ]]; then
+    CMD+=(--init_reference "$INIT_REFERENCE")
+fi
 
-ODD_RUN=$(ls -td "${OUTPUT_BASE}"/run_*_odd | head -1)
-log "Odd run dir: ${ODD_RUN}"
+if [[ -n "$WEDGE_MASK" ]]; then
+    CMD+=(--wedge_mask "$WEDGE_MASK")
+fi
 
-# ── Step 3: FSC + evolution plot ─────────────────────────────────────────────────
-log "--- Step 3: Computing FSC and generating evolution figure ---"
-mkdir -p "${FSC_OUT}"
-
-"${PYTHON}" "${SCRIPT_DIR}/plot_multi_round_fsc.py" \
-    --even_dir  "${EVEN_RUN}" \
-    --odd_dir   "${ODD_RUN}" \
-    --n_rounds  "${N_ROUNDS}" \
-    --output    "${FSC_OUT}" \
-    --apix      "${APIX}"
-
-log "Pipeline complete! Results saved in ${FSC_OUT}"
-log "  → ${FSC_OUT}/multi_round_evolution.png"
-log "  → ${FSC_OUT}/overall_average_final.mrc"
+"${CMD[@]}"
