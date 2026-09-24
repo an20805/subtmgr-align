@@ -10,7 +10,7 @@ SCRIPT="${REPO}/alignOT/src/run_iterative_alignment_gpu_halfset.py"
 # ── Configuration & Defaults (matching run_alignot_gpu.sh) ────────────────────
 DATA_DIR="${1:-${REPO}/Data/0.1/subtomograms/0}"
 OUTPUT_DIR="${REPO}/alignOT/outputs/gpu_runs"
-N_ROUNDS="${2:-7}"
+N_ROUNDS="${2:-5}"
 NUM_WORKERS="${3:-16}"
 LIMIT="${4:--1}"
 INIT_REFERENCE="${5:-}"    # Set path to initial reference, or leave empty for reference-free raw average
@@ -34,6 +34,12 @@ SEED=42
 # Set to the path of wedge_mask.mrc to enable Fourier-space wedge-masked averaging.
 WEDGE_MASK="${REPO}/Data/wedge_mask.mrc"              # e.g. "${REPO}/Data/wedge_mask.mrc"
 
+# ── Reference-Guided Mask Sampling (optional, active from Round 2 onwards) ──
+# Dilation in voxels for the soft protein mask around current reference.
+# Set to 0 to disable reference masking. Default: 8
+MASK_DILATION="${6:-8}"
+MASK_THRESHOLD="0.55"
+
 mkdir -p "${OUTPUT_DIR}"
 
 echo "======================================================================"
@@ -55,6 +61,7 @@ echo "Pixel Size        : ${APIX} Å"
 echo "Subtomogram Limit : ${LIMIT}"
 echo "Initial Reference : ${INIT_REFERENCE:-[Reference-Free Unaligned Seed]}"
 echo "Wedge Mask        : ${WEDGE_MASK:-[None — real-space sum]}"
+echo "Reference Mask    : Dilation=${MASK_DILATION} vox, Th=${MASK_THRESHOLD} (active Round 2+)"
 echo "======================================================================"
 
 CMD=(
@@ -76,6 +83,8 @@ CMD=(
     --device            "$DEVICE"
     --seed              "$SEED"
     --n_sbtms           "$LIMIT"
+    --mask_dilation     "$MASK_DILATION"
+    --mask_threshold    "$MASK_THRESHOLD"
 )
 
 if [[ -n "$INIT_REFERENCE" ]]; then

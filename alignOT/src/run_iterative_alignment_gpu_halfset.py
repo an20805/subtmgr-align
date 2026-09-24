@@ -123,15 +123,109 @@ def get_system_info(num_workers: int, device: torch.device) -> dict:
     }
 
 
+# ── Reference-Guided Mask Sampling (optional, from Round 2 onwards) ──────────
+
+# Shared per-worker reference mask (set via ProcessPoolExecutor initializer).
+# Only the mask array is shared — each task passes only its quaternion inverse.
+_WORKER_REF_MASK: Optional[np.ndarray] = None
+
+
+def _init_sampling_worker(ref_mask_np: Optional[np.ndarray]) -> None:
+    """Initialise each worker process with the current reference mask."""
+    global _WORKER_REF_MASK
+    _WORKER_REF_MASK = ref_mask_np
+
+
+def _rotate_mask_cpu(q_inv: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """
+    Rotate `mask` (reference frame, float32) by the inverse quaternion `q_inv`
+    so it lands in the original particle frame, using scipy affine_transform.
+
+    In scipy's convention:
+        out[o] = in[matrix @ o + offset]
+
+    Therefore, `matrix` must be the coordinate map R_inv = R_zyx_inv.T.
+    """
+    from scipy.ndimage import affine_transform
+    import coords as _c
+    P = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]], dtype=np.float64)
+    R_xyz_inv = np.array(_c.quaternion_to_R(list(q_inv)), dtype=np.float64)
+    R_zyx_inv = P @ R_xyz_inv @ P.T
+    R_inv_scipy = R_zyx_inv.T
+    N = mask.shape[0]
+    center = np.full(3, N / 2.0)
+    offset = center - R_inv_scipy @ center
+    rotated = affine_transform(
+        mask.astype(np.float64), R_inv_scipy,
+        offset=offset, output_shape=mask.shape,
+        order=1, mode="constant", cval=0.0,
+    )
+    return rotated.astype(np.float32)
+
+
+def build_reference_mask(
+    ref_vol: np.ndarray,
+    mask_threshold: float = 0.55,
+    dilation_vox: int = 8,
+    taper_sigma: float = 3.0,
+) -> np.ndarray:
+    """
+    Build a soft 3D protein-envelope mask from the reference volume.
+
+    Parameters
+    ----------
+    ref_vol : (D, H, W) float32 reference volume
+    mask_threshold : float
+        If > 0, evaluated on prepare_sampling_volume(ref_vol) (signal > threshold).
+        If <= 0, evaluated on low-pass filtered raw ref_vol (dark density < threshold).
+    dilation_vox : int
+        Number of voxels to dilate the binary mask beyond the protein boundary.
+    taper_sigma : float
+        Gaussian filter standard deviation in voxels for soft edge falloff.
+    """
+    from scipy.ndimage import distance_transform_edt, gaussian_filter
+    if 0.0 < mask_threshold <= 1.0:
+        prep = alignot_utils.prepare_sampling_volume(ref_vol, sigma=2.0)
+        binary = (prep > mask_threshold).astype(np.float32)
+    else:
+        v_lp = alignot_utils.gaussian_lowpass_filter(ref_vol, sigma=2.0)
+        binary = (v_lp < mask_threshold).astype(np.float32)
+
+    # EDT of complement gives distance from protein boundary
+    dist_outside = distance_transform_edt(1.0 - binary)
+    dilated = ((binary > 0.5) | (dist_outside <= dilation_vox)).astype(np.float32)
+    soft = gaussian_filter(dilated.astype(np.float64), sigma=taper_sigma)
+    return np.clip(soft, 0.0, 1.0).astype(np.float32)
+
+
 # ── Worker Task for Parallel TRN Sampling ─────────────────────────────────────
 
 def _sample_single_subtomogram(task_args: tuple) -> dict:
     import warnings
     warnings.filterwarnings("ignore", category=RuntimeWarning)
-    path, lowpass_sigma, threshold, num_points, seed = task_args
+    # task_args may carry an optional q_inv (6-element) or not (5-element)
+    if len(task_args) == 6:
+        path, lowpass_sigma, threshold, num_points, seed, q_inv = task_args
+    else:
+        path, lowpass_sigma, threshold, num_points, seed = task_args
+        q_inv = None
+
     volume = alignot_utils.load_mrc(path, permissive=True)
 
     src_prep = alignot_utils.prepare_sampling_volume(volume, sigma=lowpass_sigma)
+
+    # ── Reference-guided mask (active from Round 2 onwards when q_inv provided) ──
+    # Rotate the reference mask from the reference frame into this particle's
+    # original frame using the inverse of its previous-round alignment quaternion,
+    # then multiply into the prepared volume so TRN only samples protein density.
+    if q_inv is not None and _WORKER_REF_MASK is not None:
+        rotated_mask = _rotate_mask_cpu(q_inv, _WORKER_REF_MASK)
+        masked_prep = src_prep * rotated_mask
+        # Fallback: if masking zeroed out nearly everything, use unmasked volume
+        if masked_prep.sum() < 1e-6 * src_prep.sum():
+            masked_prep = src_prep
+        src_prep = masked_prep
+
     pts_src = alignot_utils.sample_volume_in_memory(
         src_prep,
         threshold=threshold,
@@ -484,6 +578,7 @@ def run_half_set_round_gpu(
     gpu_rotator: gpu_utils.GPUVolumeRotator,
     logger: logging.Logger,
     wedge_mask_gpu: Optional[torch.Tensor] = None,
+    prev_align_results: Optional[List[dict]] = None,
 ) -> Tuple[np.ndarray, dict, list]:
     """
     One round of AlignOT alignment for a single half-set.
@@ -493,18 +588,45 @@ def run_half_set_round_gpu(
         per-particle rotated wedge masks — the Fourier-space masked average.
         When None (default), the original real-space running sum is used,
         preserving exact backward compatibility.
+    prev_align_results : list of dicts from previous round, or None.
+        When provided and args.mask_dilation > 0, reference-guided mask sampling
+        is activated: a soft protein-envelope mask is built from current_reference,
+        rotated to each particle's prior orientation, and applied before TRN.
     """
     t0_half = time.perf_counter()
     n_actual = len(cluster_paths)
     box_size = current_reference.shape[0]
     use_wedge = wedge_mask_gpu is not None
+    use_ref_mask = (
+        getattr(args, "mask_dilation", 0) > 0
+        and round_idx > 1
+        and prev_align_results is not None
+    )
 
     avg_mode = "Fourier-space wedge-masked" if use_wedge else "real-space sum"
-    logger.info(f"--- [{half_name.upper()} HALF] Round {round_idx:02d} Starting ({n_actual} particles, device: {device}, avg: {avg_mode}) ---")
+    mask_mode = f", ref-mask: dil={args.mask_dilation}vox" if use_ref_mask else ""
+    logger.info(f"--- [{half_name.upper()} HALF] Round {round_idx:02d} Starting ({n_actual} particles, device: {device}, avg: {avg_mode}{mask_mode}) ---")
+
+    # Build reference mask if active
+    ref_mask_np = None
+    if use_ref_mask:
+        ref_mask_np = build_reference_mask(
+            current_reference,
+            mask_threshold=args.mask_threshold,
+            dilation_vox=args.mask_dilation,
+        )
+        mask_fill_pct = 100.0 * float((ref_mask_np > 0.5).sum()) / float(ref_mask_np.size)
+        logger.info(
+            f"[{half_name.upper()} HALF] Built reference mask: fill = {mask_fill_pct:.1f}% of box "
+            f"(dilation={args.mask_dilation} vox, threshold={args.mask_threshold})"
+        )
 
     # 1. Sample Reference Point Cloud via TRN
     t0_ref_trn = time.perf_counter()
     ref_prep = alignot_utils.prepare_sampling_volume(current_reference, sigma=args.lowpass_sigma)
+    if ref_mask_np is not None:
+        ref_prep = ref_prep * ref_mask_np
+
     pts_ref = alignot_utils.sample_volume_in_memory(
         ref_prep,
         threshold=args.threshold,
@@ -517,8 +639,20 @@ def run_half_set_round_gpu(
     t_ref_trn = time.perf_counter() - t0_ref_trn
 
     # 2. Parallel TRN Sampling of Particles on CPU Workers
-    logger.info(f"Sampling {n_actual} subtomogram point clouds across {args.num_workers} CPU workers...")
+    logger.info(
+        f"Sampling {n_actual} subtomogram point clouds across {args.num_workers} CPU workers..."
+        + (f" (reference-guided mask active, dil={args.mask_dilation})" if use_ref_mask else "")
+    )
     t0_sample = time.perf_counter()
+
+    prev_quat_map = {}
+    if use_ref_mask and prev_align_results is not None:
+        for r in prev_align_results:
+            # q_inv is quaternion conjugate: [w, -x, -y, -z]
+            prev_quat_map[r["file_name"]] = np.array(
+                [r["q_w"], -r["q_x"], -r["q_y"], -r["q_z"]], dtype=np.float64
+            )
+
     sampling_tasks = [
         (
             path,
@@ -526,10 +660,15 @@ def run_half_set_round_gpu(
             args.threshold,
             args.num_points,
             args.seed + round_idx * 1000 + (500 if half_name == "odd" else 0) + idx,
+            prev_quat_map.get(path.name, None) if use_ref_mask else None,
         )
         for idx, path in enumerate(cluster_paths)
     ]
-    with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+    with ProcessPoolExecutor(
+        max_workers=args.num_workers,
+        initializer=_init_sampling_worker,
+        initargs=(ref_mask_np,),
+    ) as executor:
         sampled_items = list(executor.map(_sample_single_subtomogram, sampling_tasks))
     t_sample = time.perf_counter() - t0_sample
 
@@ -717,6 +856,8 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
             "num_points": args.num_points,
             "threshold": args.threshold,
             "lowpass_sigma": args.lowpass_sigma,
+            "mask_dilation": args.mask_dilation,
+            "mask_threshold": args.mask_threshold,
             "data_dir": str(Path(args.cluster_dir).resolve()),
             "total_rounds": args.n_rounds,
             "apix": args.apix,
@@ -750,6 +891,8 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
         f.write(f"Sinkhorn Iters     : {args.sinkhorn_iters} (reg={args.reg})\n")
         f.write(f"SGD Iters / LR     : {args.sgd_iters} / {args.sgd_lr}\n")
         f.write(f"TRN Points / LP    : {args.num_points} / σ={args.lowpass_sigma} vox\n")
+        mask_info = f"Dilation={args.mask_dilation} vox, Th={args.mask_threshold}" if args.mask_dilation > 0 else "None (disabled)"
+        f.write(f"Reference Mask     : {mask_info}\n")
         f.write(f"Pixel Size (apix)  : {args.apix} Å\n")
         f.write(f"Total Pipeline Time: {total_time:.1f}s ({total_time / 60.0:.2f} min)\n")
         f.write("-" * 82 + "\n\n")
@@ -831,6 +974,25 @@ def main():
         ),
     )
 
+    # Reference-Guided Mask Sampling (active from Round 2 onwards)
+    parser.add_argument(
+        "--mask_dilation", type=int, default=8,
+        help=(
+            "Reference mask dilation in voxels (default: 8). "
+            "From Round 2 onwards, a soft protein-envelope mask is built from the current "
+            "reference, rotated to each particle's prior orientation, and used to constrain "
+            "TRN sampling to the particle interior. Set to 0 to disable reference masking."
+        ),
+    )
+    parser.add_argument(
+        "--mask_threshold", type=float, default=0.55,
+        help=(
+            "Threshold for defining protein envelope in reference mask (default: 0.55). "
+            "If in (0, 1], evaluated on normalized inverted density (> threshold). "
+            "If <= 0, evaluated on raw density (< threshold)."
+        ),
+    )
+
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -854,7 +1016,8 @@ def main():
         run_dir_name = f"run_{timestamp}_{args.run_name}"
     else:
         wedge_suffix = "_wedge" if args.wedge_mask is not None else ""
-        run_dir_name = f"run_{timestamp}{snr_tag}_alignot_{args.n_rounds}rounds_gpu_{mode_label}{metric_suffix}{wedge_suffix}"
+        refmask_suffix = "_refmask" if args.mask_dilation > 0 else ""
+        run_dir_name = f"run_{timestamp}{snr_tag}_alignot_{args.n_rounds}rounds_gpu_{mode_label}{metric_suffix}{wedge_suffix}{refmask_suffix}"
 
     run_dir = Path(args.output_base_dir) / run_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -875,6 +1038,8 @@ def main():
     logger.info(f"Sinkhorn Iters  : {args.sinkhorn_iters} (reg={args.reg})")
     logger.info(f"SGD Iters / LR  : {args.sgd_iters} / {args.sgd_lr}")
     logger.info(f"TRN Points / LP : {args.num_points} / σ={args.lowpass_sigma} vox")
+    refmask_log = f"Dilation={args.mask_dilation} vox, Th={args.mask_threshold} (active from Round 2)" if args.mask_dilation > 0 else "Disabled"
+    logger.info(f"Reference Mask  : {refmask_log}")
     logger.info(f"Pixel Size      : {args.apix} Å")
     logger.info(f"Device          : {device} ({torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'})")
     logger.info(f"TRN Workers     : {args.num_workers}")
@@ -990,6 +1155,8 @@ def main():
 
     current_ref_even = ref_even
     current_ref_odd  = ref_odd
+    prev_even_results: Optional[List[dict]] = None
+    prev_odd_results: Optional[List[dict]] = None
 
     # 5. Iterative Alignment Rounds 1 to N
     for r in range(1, args.n_rounds + 1):
@@ -1014,6 +1181,7 @@ def main():
             gpu_rotator=gpu_rotator,
             logger=logger,
             wedge_mask_gpu=wedge_mask_gpu,
+            prev_align_results=prev_even_results,
         )
 
         # Align Odd Half
@@ -1028,6 +1196,7 @@ def main():
             gpu_rotator=gpu_rotator,
             logger=logger,
             wedge_mask_gpu=wedge_mask_gpu,
+            prev_align_results=prev_odd_results,
         )
 
         # ── Inter-Half-Set Alignment (even_ref → odd_ref) ────────────────
@@ -1144,9 +1313,11 @@ def main():
         logger.info(f"  Gold-Std FSC@0.5 : {f'{res_500:.2f}Å' if res_500 else 'None'}")
         logger.info(f"  Gold-Std FSC@.143: {f'{res_143:.2f}Å' if res_143 else 'None'}")
 
-        # Update references for next iteration (ORIGINAL unaligned — no information leak)
+        # Update references and alignment history for next iteration
         current_ref_even = new_ref_even
         current_ref_odd  = new_ref_odd
+        prev_even_results = even_align_results
+        prev_odd_results  = odd_align_results
 
         # Periodically update summary files
         plot_all_rounds_fsc(fsc_history, args.apix, run_dir / "fsc_all_rounds_comparison.png")
