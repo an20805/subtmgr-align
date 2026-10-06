@@ -361,6 +361,49 @@ def align_volumes_ot(
     return aligned_vol, q_align, Bbar_align, Abar_align, cost_align
 
 
+# ── Fourier Shell Filtering ───────────────────────────────────────────────────
+
+def filter_volume_shells(vol: np.ndarray, stop_shell: int = 23, rolloff_shells: int = 2) -> np.ndarray:
+    """
+    Apply a spherical low-pass filter with raised-cosine roll-off in Fourier space.
+
+    Parameters
+    ----------
+    vol : np.ndarray
+        3D real-space volume (cubic, shape (N, N, N)).
+    stop_shell : int
+        Cutoff Fourier shell index where the filter reaches 0.0.
+    rolloff_shells : int
+        Width of the raised-cosine roll-off zone in Fourier shells.
+        Passband is [0, stop_shell - rolloff_shells].
+    """
+    if stop_shell <= 0:
+        return vol
+
+    shape = vol.shape
+    N = shape[0]
+    n_shells = N // 2
+    shell_width = 0.5 / n_shells
+    pass_shell = max(0.0, float(stop_shell - rolloff_shells))
+
+    freqs = [np.fft.fftfreq(s) for s in shape]
+    fz, fy, fx = np.meshgrid(freqs[0], freqs[1], freqs[2], indexing="ij")
+    r = np.sqrt(fz**2 + fy**2 + fx**2)
+    s = r / shell_width
+
+    weight = np.zeros_like(s, dtype=np.float32)
+    weight[s <= pass_shell] = 1.0
+
+    if rolloff_shells > 0:
+        transition = (s > pass_shell) & (s < stop_shell)
+        fraction = (s[transition] - pass_shell) / rolloff_shells
+        weight[transition] = 0.5 * (1.0 + np.cos(np.pi * fraction))
+
+    F = np.fft.fftn(vol.astype(np.float32))
+    filtered_vol = np.fft.ifftn(F * weight).real.astype(np.float32)
+    return filtered_vol
+
+
 # ── FSC & Plotting Utilities ──────────────────────────────────────────────────
 
 def compute_fsc(vol1_np: np.ndarray, vol2_np: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -874,6 +917,8 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
             "lowpass_sigma": args.lowpass_sigma,
             "mask_dilation": args.mask_dilation,
             "mask_threshold": args.mask_threshold,
+            "lp_shells": args.lp_shells,
+            "lp_rolloff": args.lp_rolloff,
             "data_dir": str(Path(args.cluster_dir).resolve()),
             "total_rounds": args.n_rounds,
             "apix": args.apix,
@@ -909,6 +954,8 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
         f.write(f"TRN Points / LP    : {args.num_points} / σ={args.lowpass_sigma} vox\n")
         mask_info = f"Dilation={args.mask_dilation} vox, Th={args.mask_threshold}" if args.mask_dilation > 0 else "None (disabled)"
         f.write(f"Reference Mask     : {mask_info}\n")
+        lp_info = f"{args.lp_shells} shells (rolloff={args.lp_rolloff})" if args.lp_shells > 0 else "None (disabled)"
+        f.write(f"Ref Shell LP Filter: {lp_info}\n")
         f.write(f"Pixel Size (apix)  : {args.apix} Å\n")
         f.write(f"Total Pipeline Time: {total_time:.1f}s ({total_time / 60.0:.2f} min)\n")
         f.write("-" * 82 + "\n\n")
@@ -1009,6 +1056,20 @@ def main():
         ),
     )
 
+    # Fourier shell low-pass filtering (active from Round 1 onwards)
+    parser.add_argument(
+        "--lp_shells", type=int, default=0,
+        help=(
+            "Cutoff Fourier shell index for low-pass filtering intermediate references from "
+            "Round 1 onwards (default: 0 = disabled). Frequencies up to (lp_shells - lp_rolloff) "
+            "are kept at 1.0, rolling off via raised-cosine to 0.0 at lp_shells."
+        ),
+    )
+    parser.add_argument(
+        "--lp_rolloff", type=int, default=2,
+        help="Width of the raised-cosine roll-off zone in Fourier shells (default: 2)."
+    )
+
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -1033,7 +1094,8 @@ def main():
     else:
         wedge_suffix = "_wedge" if args.wedge_mask is not None else ""
         refmask_suffix = "_refmask" if args.mask_dilation > 0 else ""
-        run_dir_name = f"run_{timestamp}{snr_tag}_alignot_{args.n_rounds}rounds_gpu_{mode_label}{metric_suffix}{wedge_suffix}{refmask_suffix}"
+        lp_suffix = f"_lp{args.lp_shells}" if args.lp_shells > 0 else ""
+        run_dir_name = f"run_{timestamp}{snr_tag}_alignot_{args.n_rounds}rounds_gpu_{mode_label}{metric_suffix}{wedge_suffix}{refmask_suffix}{lp_suffix}"
 
     run_dir = Path(args.output_base_dir) / run_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1056,6 +1118,8 @@ def main():
     logger.info(f"TRN Points / LP : {args.num_points} / σ={args.lowpass_sigma} vox")
     refmask_log = f"Dilation={args.mask_dilation} vox, Th={args.mask_threshold} (active from Round 2)" if args.mask_dilation > 0 else "Disabled"
     logger.info(f"Reference Mask  : {refmask_log}")
+    lp_log = f"Cutoff={args.lp_shells} shells (rolloff={args.lp_rolloff}), active Round 1+" if args.lp_shells > 0 else "Disabled"
+    logger.info(f"Ref LP Filter   : {lp_log}")
     logger.info(f"Pixel Size      : {args.apix} Å")
     logger.info(f"Device          : {device} ({torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'})")
     logger.info(f"TRN Workers     : {args.num_workers}")
@@ -1214,6 +1278,16 @@ def main():
             wedge_mask_gpu=wedge_mask_gpu,
             prev_align_results=prev_odd_results,
         )
+
+        # Apply Fourier shell low-pass filtering with cosine edge from Round 1 onwards
+        if args.lp_shells > 0:
+            nom_res = args.apix * (box_size / args.lp_shells)
+            logger.info(
+                f"[Ref LP Filter] Applying Fourier shell LP filter to Round {r:02d} references: "
+                f"stop_shell={args.lp_shells} (~{nom_res:.2f}Å), rolloff={args.lp_rolloff} shells"
+            )
+            new_ref_even = filter_volume_shells(new_ref_even, stop_shell=args.lp_shells, rolloff_shells=args.lp_rolloff)
+            new_ref_odd  = filter_volume_shells(new_ref_odd,  stop_shell=args.lp_shells, rolloff_shells=args.lp_rolloff)
 
         # ── Inter-Half-Set Alignment (even_ref → odd_ref) ────────────────
         # Align even reference into the odd reference frame for FSC & combined average.

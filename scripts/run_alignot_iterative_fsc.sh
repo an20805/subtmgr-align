@@ -22,8 +22,8 @@ REG=100.0                  # Sinkhorn entropic regularisation
 SINKHORN_ITERS=50          # Sinkhorn scaling iterations
 SGD_ITERS=1000              # SGD iterations per particle
 SGD_LR=0.001               # SGD learning rate
-NUM_POINTS=500             # TRN points per volume
-THRESHOLD=0.7              # Density threshold after inversion
+NUM_POINTS=1500             # TRN points per volume
+THRESHOLD=0.5              # Density threshold after inversion
 LOWPASS_SIGMA=2.0          # Gaussian LP sigma (voxels) before sampling only
 APIX=4.0                   # Voxel size in Angstroms
 DEVICE="cuda"              # GPU device
@@ -37,8 +37,12 @@ WEDGE_MASK="${REPO}/Data/wedge_mask.mrc"              # e.g. "${REPO}/Data/wedge
 # ── Reference-Guided Mask Sampling (optional, active from Round 2 onwards) ──
 # Dilation in voxels for the soft protein mask around current reference.
 # Set to 0 to disable reference masking. Default: 8
-MASK_DILATION="${6:-8}"
+MASK_DILATION="${6:-0}"
 MASK_THRESHOLD="-0.15"
+
+# ── Reference Low-Pass Filtering (active from Round 1 onwards) ──────────────
+LP_SHELLS="${7:-23}"       # Cutoff Fourier shell (default: 23 shells ≈ 15.8Å). Set to 0 to disable.
+LP_ROLLOFF="2"             # Raised-cosine roll-off in shells (default: 2)
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -62,6 +66,7 @@ echo "Subtomogram Limit : ${LIMIT}"
 echo "Initial Reference : ${INIT_REFERENCE:-[Reference-Free Unaligned Seed]}"
 echo "Wedge Mask        : ${WEDGE_MASK:-[None — real-space sum]}"
 echo "Reference Mask    : Dilation=${MASK_DILATION} vox, Th=${MASK_THRESHOLD} (active Round 2+)"
+echo "Ref LP Filter     : Shells=${LP_SHELLS} (rolloff=${LP_ROLLOFF}), active Round 1+"
 echo "======================================================================"
 
 CMD=(
@@ -85,6 +90,8 @@ CMD=(
     --n_sbtms           "$LIMIT"
     --mask_dilation     "$MASK_DILATION"
     --mask_threshold    "$MASK_THRESHOLD"
+    --lp_shells         "$LP_SHELLS"
+    --lp_rolloff        "$LP_ROLLOFF"
 )
 
 if [[ -n "$INIT_REFERENCE" ]]; then
