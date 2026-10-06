@@ -12,7 +12,7 @@ DATA_DIR="${1:-${REPO}/Data/0.1/subtomograms/0}"
 OUTPUT_DIR="${REPO}/alignOT/outputs/gpu_runs"
 N_ROUNDS="${2:-5}"
 NUM_WORKERS="${3:-16}"
-LIMIT="${4:--1}"
+LIMIT="${4:-200}"
 INIT_REFERENCE="${5:-}"    # Set path to initial reference, or leave empty for reference-free raw average
 
 # ── AlignOT GPU Parameters ───────────────────────────────────────────────────
@@ -22,8 +22,8 @@ REG=100.0                  # Sinkhorn entropic regularisation
 SINKHORN_ITERS=50          # Sinkhorn scaling iterations
 SGD_ITERS=1000              # SGD iterations per particle
 SGD_LR=0.001               # SGD learning rate
-NUM_POINTS=1500             # TRN points per volume
-THRESHOLD=0.5              # Density threshold after inversion
+NUM_POINTS=500             # TRN points per volume
+THRESHOLD=0.7              # Density threshold after inversion
 LOWPASS_SIGMA=2.0          # Gaussian LP sigma (voxels) before sampling only
 APIX=4.0                   # Voxel size in Angstroms
 DEVICE="cuda"              # GPU device
@@ -32,7 +32,7 @@ SEED=42
 # ── Wedge-Mask Averaging (optional) ─────────────────────────────────────────
 # Leave empty for the original real-space sum (default / backward-compatible).
 # Set to the path of wedge_mask.mrc to enable Fourier-space wedge-masked averaging.
-WEDGE_MASK="${REPO}/Data/wedge_mask.mrc"              # e.g. "${REPO}/Data/wedge_mask.mrc"
+WEDGE_MASK=""              # e.g. "${REPO}/Data/wedge_mask.mrc"
 
 # ── Reference-Guided Mask Sampling (optional, active from Round 2 onwards) ──
 # Dilation in voxels for the soft protein mask around current reference.
