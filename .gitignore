@@ -118,3 +118,7 @@ alignOT/outputs/
 
 # EMAN2 intermediate processing output
 eman2_baseline/sptsgd/
+eman2_baseline/runs/
+.eman2settings.json
+info/
+

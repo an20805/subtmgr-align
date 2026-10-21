@@ -8,22 +8,22 @@ PYTHON="${REPO}/alignOT/alignot_env/bin/python"
 SCRIPT="${REPO}/alignOT/src/run_iterative_alignment_gpu_halfset.py"
 
 # ── Configuration & Defaults (matching run_alignot_gpu.sh) ────────────────────
-DATA_DIR="${1:-${REPO}/Data/0.1/subtomograms/0}"
+DATA_DIR="${1:-${REPO}/Data/0.1/subtomograms/3}"
 OUTPUT_DIR="${REPO}/alignOT/outputs/gpu_runs"
-N_ROUNDS="${2:-5}"
+N_ROUNDS="${2:-10}"
 NUM_WORKERS="${3:-16}"
-LIMIT="${4:-200}"
+LIMIT="${4:--1}"
 INIT_REFERENCE="${5:-}"    # Set path to initial reference, or leave empty for reference-free raw average
 
 # ── AlignOT GPU Parameters ───────────────────────────────────────────────────
 TARGET_MODE="base"         # "base" (argmax) or "barycentric" (1-NN)
 COST_METRIC="l2_sq"        # "l2_sq", "l1", or "l2"
-REG=100.0                  # Sinkhorn entropic regularisation
+REG=25.0                  # Sinkhorn entropic regularisation
 SINKHORN_ITERS=50          # Sinkhorn scaling iterations
-SGD_ITERS=1000              # SGD iterations per particle
+SGD_ITERS=500              # SGD iterations per particle
 SGD_LR=0.001               # SGD learning rate
 NUM_POINTS=500             # TRN points per volume
-THRESHOLD=0.7              # Density threshold after inversion
+THRESHOLD=0.6              # Density threshold after inversion
 LOWPASS_SIGMA=2.0          # Gaussian LP sigma (voxels) before sampling only
 APIX=4.0                   # Voxel size in Angstroms
 DEVICE="cuda"              # GPU device
@@ -32,17 +32,23 @@ SEED=42
 # ── Wedge-Mask Averaging (optional) ─────────────────────────────────────────
 # Leave empty for the original real-space sum (default / backward-compatible).
 # Set to the path of wedge_mask.mrc to enable Fourier-space wedge-masked averaging.
-WEDGE_MASK=""              # e.g. "${REPO}/Data/wedge_mask.mrc"
+WEDGE_MASK="${REPO}/Data/wedge_mask.mrc"              # e.g. "${REPO}/Data/wedge_mask.mrc"
 
 # ── Reference-Guided Mask Sampling (optional, active from Round 2 onwards) ──
 # Dilation in voxels for the soft protein mask around current reference.
 # Set to 0 to disable reference masking. Default: 8
-MASK_DILATION="${6:-0}"
-MASK_THRESHOLD="-0.15"
+MASK_DILATION="${6:-8}"
+MASK_THRESHOLD="-0.1"
 
 # ── Reference Low-Pass Filtering (active from Round 1 onwards) ──────────────
-LP_SHELLS="${7:-23}"       # Cutoff Fourier shell (default: 23 shells ≈ 15.8Å). Set to 0 to disable.
+LP_SHELLS="${7:-0}"        # Cutoff Fourier shell (set to 0 to disable, or e.g. 23 shells ≈ 15.8Å)
 LP_ROLLOFF="2"             # Raised-cosine roll-off in shells (default: 2)
+
+# ── Common Combined Reference Rounds (active for first N rounds) ───────────
+COMMON_REF_ROUNDS="${8:-2}"        # Common combined reference for first N rounds (default: 2)
+
+# ── Particle Rejection Fraction (Wasserstein distance) ─────────────────────
+REJECTION_FRACTION="${9:-0.0}"     # Reject worst fraction by OT distance (default: 0.20 = top 80%)
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -59,6 +65,7 @@ echo "Cost Metric       : ${COST_METRIC}"
 echo "Sinkhorn Iters    : ${SINKHORN_ITERS} (reg=${REG})"
 echo "SGD Iters / LR    : ${SGD_ITERS} / ${SGD_LR}"
 echo "TRN Points / LP   : ${NUM_POINTS} / σ=${LOWPASS_SIGMA} vox"
+echo "Density Threshold : ${THRESHOLD} (cutoff)"
 echo "Device            : ${DEVICE}"
 echo "TRN CPU Workers   : ${NUM_WORKERS}"
 echo "Pixel Size        : ${APIX} Å"
@@ -67,6 +74,8 @@ echo "Initial Reference : ${INIT_REFERENCE:-[Reference-Free Unaligned Seed]}"
 echo "Wedge Mask        : ${WEDGE_MASK:-[None — real-space sum]}"
 echo "Reference Mask    : Dilation=${MASK_DILATION} vox, Th=${MASK_THRESHOLD} (active Round 2+)"
 echo "Ref LP Filter     : Shells=${LP_SHELLS} (rolloff=${LP_ROLLOFF}), active Round 1+"
+echo "Common Ref Rounds : ${COMMON_REF_ROUNDS} (Rounds 1-${COMMON_REF_ROUNDS} use combined ref, then branch to split)"
+echo "Rejection Fraction: ${REJECTION_FRACTION} (keep top $(awk "BEGIN {print int((1.0-${REJECTION_FRACTION})*100)}")% particles by Wass distance)"
 echo "======================================================================"
 
 CMD=(
@@ -92,6 +101,8 @@ CMD=(
     --mask_threshold    "$MASK_THRESHOLD"
     --lp_shells         "$LP_SHELLS"
     --lp_rolloff        "$LP_ROLLOFF"
+    --common_ref_rounds "$COMMON_REF_ROUNDS"
+    --rejection_fraction "$REJECTION_FRACTION"
 )
 
 if [[ -n "$INIT_REFERENCE" ]]; then

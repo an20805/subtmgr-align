@@ -13,7 +13,8 @@ REMOTE_DIR="/users/student/pg/pg25/anshuman/subtmgr-align"
 echo "Syncing code to ${SERVER}..."
 
 # We use rsync to push changes.
-# We EXCLUDE datasets and output folders so we don't waste time/bandwidth uploading them.     --exclude 'experiments/' \
+# We EXCLUDE datasets and output folders so we don't waste time/bandwidth uploading them.     
+    # --exclude 'Data/' \
 
 rsync -avz \
     --exclude '.git' \
@@ -22,12 +23,13 @@ rsync -avz \
     --exclude 'envs/' \
     --exclude 'EMPOT/empot/' \
     --exclude 'Subtomograms_40_deg_uniform/' \
-    --exclude 'eman2_baseline/' \
+    --exclude 'eman2_baseline/runs/' \
     --exclude 'EMPOT/outputs/' \
     --exclude 'papers/' \
-    --exclude 'Data/' \
     --exclude 'alignOT/outputs/' \
     --exclude 'alignOT/alignot_env/' \
+    --exclude 'experiments/' \
+    --exclude 'temp/' \
     ./ ${SERVER}:${REMOTE_DIR}
 
 echo "------------------------------------------------------"

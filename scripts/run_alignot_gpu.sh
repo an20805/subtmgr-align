@@ -16,11 +16,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${REPO}/alignOT/alignot_env/bin/python"
 SCRIPT="${REPO}/alignOT/src/run_iterative_alignment_gpu.py"
 
-CLUSTER_DIR="${REPO}/Data/0.1/Cluster_0"
+CLUSTER_DIR="${REPO}/Data/0.001/Cluster_0"
 OUTPUT_DIR="${REPO}/alignOT/outputs/gpu_runs"
 
 # ── Alignment loop & Reference ────────────────────────────────────────────────
-N_ROUNDS=10
+N_ROUNDS=5
 INIT_REFERENCE=""   # Set to initial reference MRC ${REPO}/Data/0.mrc , or leave empty to compute streaming average
 
 # ── Particle selection ────────────────────────────────────────────────────────
@@ -55,6 +55,11 @@ echo "Subtomograms Dir  : ${CLUSTER_DIR}"
 echo "Output Base Dir   : ${OUTPUT_DIR}"
 echo "Cost Metric       : ${COST_METRIC}"
 echo "Target Mode       : ${TARGET_MODE}"
+echo "Sinkhorn Iters    : ${SINKHORN_ITERS} (reg=${REG})"
+echo "SGD Iters / LR    : ${SGD_ITERS} / ${SGD_LR}"
+echo "TRN Points / LP   : ${NUM_POINTS} / σ=${LOWPASS_SIGMA} vox"
+echo "Density Threshold : ${THRESHOLD} (cutoff)"
+echo "Selection Mode    : ${SELECTION_MODE}"
 echo "CPU Workers       : ${NUM_WORKERS}"
 echo "Device            : ${DEVICE}"
 echo "======================================================================"

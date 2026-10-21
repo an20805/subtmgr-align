@@ -305,7 +305,8 @@ def main():
             seed=args.seed + round_idx * 1000,
             device=device,
         )
-        torch.cuda.synchronize()
+        if device.type == "cuda":
+            torch.cuda.synchronize()
         t_gpu_sgd = time.perf_counter() - t0_gpu_sgd
         logger.info(f"Completed Native GPU Batched SGD in {t_gpu_sgd:.2f}s ({t_gpu_sgd / n_actual * 1000:.1f} ms/particle)!")
 
@@ -345,13 +346,15 @@ def main():
 
             del vol_np, rot_vol_gpu
 
-        torch.cuda.synchronize()
+        if device.type == "cuda":
+            torch.cuda.synchronize()
         logger.info(f"Transformed & accumulated {n_actual} volumes on GPU in {time.perf_counter() - t0_gpu_rot:.2f}s")
 
         # 6. Build new reference
         next_reference = (sum_rotated_gpu / float(n_actual)).float().cpu().numpy()
         del sum_rotated_gpu, sampled_items, src_b_np
-        torch.cuda.empty_cache()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
         alignot_utils.save_mrc(
             output_dir / f"reference_round_{round_idx:02d}.mrc", next_reference

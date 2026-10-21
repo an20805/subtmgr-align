@@ -175,21 +175,27 @@ def compute_fsc(vol1, vol2):
 
 def resolution_at_threshold(shell_centers, fsc_values, threshold, apix, n_voxels=None):
     """
-    Return the spatial resolution (in Angstroms) where FSC first drops
-    below `threshold`.  Returns None if FSC never drops below threshold.
-    apix      : pixel size in Angstroms.
-    n_voxels  : optional array; shells with <= 1 voxel (DC shell) are skipped.
+    Interpolate spatial resolution (in Angstroms) where FSC first drops
+    below `threshold`. Returns None if FSC never drops below threshold.
+    Uses continuous linear interpolation between adjacent shells.
     """
-    for i, (freq, val) in enumerate(zip(shell_centers, fsc_values)):
-        if freq <= 0:
-            continue
-        # Skip the DC/near-DC shell — it contains only the volume mean and
-        # is numerically unstable for zero-mean normalized volumes.
+    for i in range(len(fsc_values) - 1):
         if n_voxels is not None and n_voxels[i] <= 1:
             continue
-        if val < threshold:
-            return apix / freq
-    return None   # FSC stays above threshold up to Nyquist
+        v1, v2 = fsc_values[i], fsc_values[i + 1]
+        f1, f2 = shell_centers[i], shell_centers[i + 1]
+        if v1 >= threshold >= v2:
+            if v1 == v2:
+                freq = f1
+            else:
+                freq = f1 + (threshold - v1) * (f2 - f1) / (v2 - v1)
+            return float(apix / freq) if freq > 0 else None
+        elif v1 < threshold and i == 0:
+            return float(apix / f1) if f1 > 0 else None
+
+    if fsc_values[-1] >= threshold:
+        return float(apix / shell_centers[-1])
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

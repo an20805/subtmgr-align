@@ -17,17 +17,21 @@ Outputs per run:
   │   ├── ref_even_round_00.mrc
   │   ├── ref_odd_round_00.mrc
   │   ├── ref_combined_round_00.mrc
+  │   ├── ref_combined_round_00_inverted.mrc
   │   ├── fsc_round_00.csv / .png
   │   └── slices_round_00.png
   ├── round_01/ ... round_05/
   │   ├── ref_even_round_0X.mrc
   │   ├── ref_odd_round_0X.mrc
   │   ├── ref_combined_round_0X.mrc
+  │   ├── ref_combined_round_0X_inverted.mrc
   │   ├── metrics_particles_even_round_0X.csv
   │   ├── metrics_particles_odd_round_0X.csv
   │   ├── transforms_even.json / transforms_odd.json
   │   ├── fsc_round_0X.csv / .png
   │   └── slices_round_0X.png
+  ├── ref_combined_best_fsc_inverted.mrc            <-- Best-FSC inverted average for ChimeraX
+  ├── ref_combined_best_fsc_round_0X_inverted.mrc   <-- Round-tagged best inverted average
   ├── fsc_all_rounds_comparison.png
   ├── slices_all_rounds_comparison.png
   ├── timing_report.txt
@@ -752,7 +756,25 @@ def run_half_set_round_gpu(
         torch.cuda.synchronize()
     t_gpu_sgd = time.perf_counter() - t0_gpu_sgd
 
-    # 5. GPU 3D Volume Rigid Transformation & Accumulation
+    # 5. Particle Rejection Filtering (based on Wasserstein OT cost)
+    costs_np = np.asarray(costs_gpu, dtype=np.float64)
+    rej_frac = getattr(args, "rejection_fraction", 0.0)
+    if rej_frac > 0.0:
+        n_keep = max(1, int(round(n_actual * (1.0 - rej_frac))))
+        sorted_indices = np.argsort(costs_np)
+        accepted_set = set(sorted_indices[:n_keep].tolist())
+        cutoff_cost = float(costs_np[sorted_indices[n_keep - 1]])
+        logger.info(
+            f"[{half_name.upper()} HALF] Rejection filtering active (rej_frac={rej_frac:.2f}): "
+            f"keeping top {n_keep}/{n_actual} particles ({100.0 * n_keep / n_actual:.1f}%), "
+            f"Wass cutoff = {cutoff_cost:.3f}"
+        )
+    else:
+        n_keep = n_actual
+        accepted_set = set(range(n_actual))
+        cutoff_cost = float(np.max(costs_np)) if len(costs_np) > 0 else 0.0
+
+    # 6. GPU 3D Volume Rigid Transformation & Accumulation
     t0_gpu_rot = time.perf_counter()
     alignment_results = []
 
@@ -777,42 +799,48 @@ def run_half_set_round_gpu(
         Bbar_mask = np.zeros(3, dtype=np.float64)
 
         for item_idx, item in enumerate(sampled_items, start=1):
-            vol_np = item["volume"]
-            Bbar   = item["Bbar"]
-            q      = quats_gpu[item_idx - 1]
-            cost   = float(costs_gpu[item_idx - 1])
+            idx    = item_idx - 1
+            cost   = float(costs_np[idx])
+            q      = quats_gpu[idx]
+            is_acc = idx in accepted_set
 
-            # 1. Rotate volume in real space (same as original path)
-            rot_vol = gpu_rotator.rotate_volume(vol_np, q, Bbar, Abar)  # (D, H, W), float32
+            if is_acc:
+                vol_np = item["volume"]
+                Bbar   = item["Bbar"]
 
-            # 2. Rotate wedge mask around center on GPU
-            rot_mask_f = gpu_rotator.rotate_volume(
-                wedge_mask_gpu, q, Bbar_mask, Bbar_mask
-            ).double()  # (D, H, W), float64
-            rot_mask = (rot_mask_f >= 0.5).double()
+                # 1. Rotate volume in real space (same as original path)
+                rot_vol = gpu_rotator.rotate_volume(vol_np, q, Bbar, Abar)  # (D, H, W), float32
 
-            # 3. FFT of rotated volume, shifted so DC is at the center
-            F_i = torch.fft.fftshift(torch.fft.fftn(rot_vol.double()))  # complex128
+                # 2. Rotate wedge mask around center on GPU
+                rot_mask_f = gpu_rotator.rotate_volume(
+                    wedge_mask_gpu, q, Bbar_mask, Bbar_mask
+                ).double()  # (D, H, W), float64
+                rot_mask = (rot_mask_f >= 0.5).double()
 
-            # 4. Accumulate in Fourier space
-            F_sum += rot_mask * F_i
-            W_sum += rot_mask
+                # 3. FFT of rotated volume, shifted so DC is at the center
+                F_i = torch.fft.fftshift(torch.fft.fftn(rot_vol.double()))  # complex128
+
+                # 4. Accumulate in Fourier space
+                F_sum += rot_mask * F_i
+                W_sum += rot_mask
+
+                del vol_np, rot_vol, rot_mask_f, rot_mask, F_i
 
             alignment_results.append({
-                "index": item_idx - 1,
+                "index": idx,
                 "subtomogram_id": item["subtomogram_id"],
                 "file_name": item["file_name"],
                 "wass_dist": cost,
+                "accepted": is_acc,
                 "q_w": float(q[0]), "q_x": float(q[1]),
                 "q_y": float(q[2]), "q_z": float(q[3]),
             })
-            del vol_np, rot_vol, rot_mask_f, rot_mask, F_i
 
         if device.type == "cuda":
             torch.cuda.synchronize()
         t_gpu_rot = time.perf_counter() - t0_gpu_rot
 
-        # 6. Reconstruct reference from weighted Fourier average
+        # 7. Reconstruct reference from weighted Fourier average
         # Divide F_sum / W_sum where at least one particle measured that frequency
         mask_measured = W_sum > 0.5
         F_avg = torch.zeros_like(F_sum)
@@ -830,39 +858,43 @@ def run_half_set_round_gpu(
         )
 
         for item_idx, item in enumerate(sampled_items, start=1):
-            vol_np = item["volume"]
-            Bbar   = item["Bbar"]
-            q      = quats_gpu[item_idx - 1]
-            cost   = float(costs_gpu[item_idx - 1])
+            idx    = item_idx - 1
+            cost   = float(costs_np[idx])
+            q      = quats_gpu[idx]
+            is_acc = idx in accepted_set
 
-            rot_vol_gpu = gpu_rotator.rotate_volume(vol_np, q, Bbar, Abar)
-            sum_rotated_gpu += rot_vol_gpu.double()
+            if is_acc:
+                vol_np = item["volume"]
+                Bbar   = item["Bbar"]
+                rot_vol_gpu = gpu_rotator.rotate_volume(vol_np, q, Bbar, Abar)
+                sum_rotated_gpu += rot_vol_gpu.double()
+                del vol_np, rot_vol_gpu
 
             alignment_results.append({
-                "index": item_idx - 1,
+                "index": idx,
                 "subtomogram_id": item["subtomogram_id"],
                 "file_name": item["file_name"],
                 "wass_dist": cost,
+                "accepted": is_acc,
                 "q_w": float(q[0]), "q_x": float(q[1]),
                 "q_y": float(q[2]), "q_z": float(q[3]),
             })
-            del vol_np, rot_vol_gpu
 
         if device.type == "cuda":
             torch.cuda.synchronize()
         t_gpu_rot = time.perf_counter() - t0_gpu_rot
 
-        # 6. Build new half reference
-        new_reference = (sum_rotated_gpu / float(n_actual)).float().cpu().numpy()
+        # 7. Build new half reference (normalized by n_keep accepted particles)
+        new_reference = (sum_rotated_gpu / float(n_keep)).float().cpu().numpy()
         del sum_rotated_gpu
 
     del sampled_items, src_b_np
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
-
     total_half_time = time.perf_counter() - t0_half
-    mean_cost = float(np.mean([r["wass_dist"] for r in alignment_results]))
+    mean_cost_all = float(np.mean([r["wass_dist"] for r in alignment_results]))
+    mean_cost_acc = float(np.mean([r["wass_dist"] for r in alignment_results if r["accepted"]]))
 
     # Save per-particle metrics CSV
     df_metrics = pd.DataFrame(alignment_results)
@@ -876,18 +908,31 @@ def run_half_set_round_gpu(
         json.dump({
             "half": half_name,
             "round": round_idx,
-            "mean_score": mean_cost,
+            "mean_score": mean_cost_acc,
+            "mean_score_all": mean_cost_all,
+            "n_total": n_actual,
+            "n_accepted": n_keep,
+            "n_rejected": n_actual - n_keep,
+            "rejection_fraction": rej_frac,
+            "cutoff_score": cutoff_cost,
             "align_time_s": t_gpu_sgd,
             "total_time_s": total_half_time,
             "transforms": alignment_results
         }, f, indent=2)
 
-    logger.info(f"[{half_name.upper()} HALF] Round {round_idx:02d} Complete: mean_wass={mean_cost:.3f}, "
+    logger.info(f"[{half_name.upper()} HALF] Round {round_idx:02d} Complete: mean_wass={mean_cost_acc:.3f} "
+                f"(all={mean_cost_all:.3f}, accepted={n_keep}/{n_actual}), "
                 f"sample={t_sample:.1f}s, sgd={t_gpu_sgd:.2f}s, rot={t_gpu_rot:.2f}s, total={total_half_time:.1f}s "
                 f"({total_half_time / n_actual:.3f}s/ptcl)")
 
     metrics_dict = {
-        "mean_score": mean_cost,
+        "mean_score": mean_cost_acc,
+        "mean_score_all": mean_cost_all,
+        "n_total": n_actual,
+        "n_accepted": n_keep,
+        "n_rejected": n_actual - n_keep,
+        "rejection_fraction": rej_frac,
+        "cutoff_score": cutoff_cost,
         "sample_time_s": t_sample,
         "align_time_s": t_gpu_sgd,
         "accum_time_s": t_gpu_rot,
@@ -897,9 +942,120 @@ def run_half_set_round_gpu(
     return new_reference, metrics_dict, alignment_results
 
 
+# ── Best FSC Inverted Density Map Export ──────────────────────────────────────
+
+def get_best_fsc_round(rounds_metrics: list) -> Tuple[int, dict]:
+    """
+    Find the round with the best Gold-Standard FSC resolution.
+
+    Ranking hierarchy:
+      1. Filter to iterative alignment rounds (round > 0) if available; fallback to round 0.
+      2. Category 0: Resolved FSC @ 0.143 (lower Å is higher spatial resolution).
+      3. Category 1: Resolved FSC @ 0.500 (lower Å is higher spatial resolution).
+      4. Tie-breaking by lower FSC @ 0.500, then highest round number (latest refinement).
+    """
+    candidates = [m for m in rounds_metrics if m.get("round", 0) > 0]
+    if not candidates:
+        candidates = rounds_metrics
+
+    def _rank_key(m):
+        r143 = m.get("fsc_0143_res_angstrom")
+        r500 = m.get("fsc_0500_res_angstrom")
+        rnd = m.get("round", 0)
+        if r143 is not None and r143 > 0:
+            return (0, float(r143), float(r500) if r500 else 9999.0, -rnd)
+        elif r500 is not None and r500 > 0:
+            return (1, float(r500), 9999.0, -rnd)
+        else:
+            return (2, 9999.0, 9999.0, -rnd)
+
+    best_m = min(candidates, key=_rank_key)
+    return int(best_m["round"]), best_m
+
+
+def save_best_fsc_inverted_reference(
+    run_dir: Path,
+    best_round: int,
+    best_metric: dict,
+    slices_history: list,
+    apix: float,
+    logger: logging.Logger,
+) -> dict:
+    """
+    Saves the contrast-inverted MRC volume for the best FSC combined reference
+    both at the top level of run_dir and ensures it exists in the winning round directory.
+    Cleans up any previous round-tagged best inverted files at the top level if a later round improves.
+    """
+    # 1. Retrieve the combined volume for best_round
+    vol = None
+    for r_idx, vol_np, _ in slices_history:
+        if r_idx == best_round:
+            vol = vol_np
+            break
+    if vol is None:
+        ref_p = run_dir / f"round_{best_round:02d}" / f"ref_combined_round_{best_round:02d}.mrc"
+        if ref_p.exists():
+            vol = alignot_utils.load_mrc(ref_p)
+
+    if vol is None:
+        logger.warning(f"[Best FSC] Could not find combined reference volume for round {best_round:02d}.")
+        return {}
+
+    # 2. Invert contrast: protein densities (< 0 in cryo-ET) become bright/positive (> 0) for ChimeraX
+    vol_inv = -vol.astype(np.float32)
+
+    # 3. Clean up any previous round-tagged best inverted files at top level
+    for old_f in run_dir.glob("ref_combined_best_fsc_round_*_inverted.mrc"):
+        try:
+            old_f.unlink()
+        except OSError:
+            pass
+
+    # 4. Save to top level: both fixed alias and round-tagged filenames
+    best_tagged_name = f"ref_combined_best_fsc_round_{best_round:02d}_inverted.mrc"
+    best_tagged_path = run_dir / best_tagged_name
+    best_alias_name = "ref_combined_best_fsc_inverted.mrc"
+    best_alias_path = run_dir / best_alias_name
+
+    alignot_utils.save_mrc(best_tagged_path, vol_inv, voxel_size=apix)
+    alignot_utils.save_mrc(best_alias_path, vol_inv, voxel_size=apix)
+
+    # 5. Ensure winning round directory also contains the inverted combined volume
+    round_inv_path = run_dir / f"round_{best_round:02d}" / f"ref_combined_round_{best_round:02d}_inverted.mrc"
+    alignot_utils.save_mrc(round_inv_path, vol_inv, voxel_size=apix)
+
+    r143 = best_metric.get("fsc_0143_res_angstrom")
+    r500 = best_metric.get("fsc_0500_res_angstrom")
+    res_str = f"FSC@0.143 = {r143:.2f}Å" if r143 else (f"FSC@0.500 = {r500:.2f}Å" if r500 else "unresolved")
+
+    logger.info(
+        f"[Best FSC Inverted Map] Round {best_round:02d} selected ({res_str}).\n"
+        f"  Saved inverted MRC for ChimeraX:\n"
+        f"    -> {best_alias_path}\n"
+        f"    -> {best_tagged_path}"
+    )
+
+    return {
+        "best_round": best_round,
+        "fsc_0143_res_angstrom": r143,
+        "fsc_0500_res_angstrom": r500,
+        "inverted_mrc_filename": best_alias_name,
+        "inverted_mrc_path": str(best_alias_path.resolve()),
+        "inverted_mrc_tagged_filename": best_tagged_name,
+        "inverted_mrc_tagged_path": str(best_tagged_path.resolve()),
+    }
+
+
 # ── Write Summary Files ───────────────────────────────────────────────────────
 
-def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace, rounds_metrics: list, t0: float):
+def write_summary_files(
+    run_dir: Path,
+    sys_info: dict,
+    args: argparse.Namespace,
+    rounds_metrics: list,
+    t0: float,
+    best_info: Optional[dict] = None,
+):
     total_time = time.perf_counter() - t0
 
     # JSON Summary
@@ -915,10 +1071,16 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
             "num_points": args.num_points,
             "threshold": args.threshold,
             "lowpass_sigma": args.lowpass_sigma,
+            "wedge_mask": str(args.wedge_mask) if args.wedge_mask else None,
             "mask_dilation": args.mask_dilation,
             "mask_threshold": args.mask_threshold,
             "lp_shells": args.lp_shells,
             "lp_rolloff": args.lp_rolloff,
+            "common_ref_rounds": getattr(args, "common_ref_rounds", 0),
+            "rejection_fraction": getattr(args, "rejection_fraction", 0.0),
+            "init_reference": str(args.init_reference) if args.init_reference else None,
+            "n_sbtms": args.n_sbtms,
+            "seed": args.seed,
             "data_dir": str(Path(args.cluster_dir).resolve()),
             "total_rounds": args.n_rounds,
             "apix": args.apix,
@@ -926,8 +1088,10 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
             "device": str(args.device),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
             "total_elapsed_seconds": total_time,
-            "system_info": sys_info
+            "system_info": sys_info,
+            "cli_args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         },
+        "best_fsc_summary": best_info,
         "rounds": rounds_metrics
     }
 
@@ -938,6 +1102,8 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
     # Text Report
     txt_path = run_dir / "timing_report.txt"
     mode_str = f"{args.target_mode} ({'argmax' if args.target_mode in ('base', 'argmax') else '1-NN'})"
+    common_rounds = getattr(args, "common_ref_rounds", 0)
+    rej_frac = getattr(args, "rejection_fraction", 0.0)
     with open(txt_path, "w") as f:
         f.write("=" * 82 + "\n")
         f.write(f"ALIGNOT GPU ({args.target_mode.upper()}) SUBTOMOGRAM ALIGNMENT BENCHMARK REPORT\n")
@@ -947,15 +1113,27 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
         f.write(f"CPU Model          : {sys_info.get('processor', 'Unknown')} ({sys_info.get('machine', '')})\n")
         f.write(f"TRN Workers Used   : {args.num_workers}\n")
         f.write(f"Dataset            : {str(Path(args.cluster_dir).resolve())}\n")
+        f.write(f"Subtomograms Limit : {args.n_sbtms if args.n_sbtms > 0 else 'All'}\n")
+        f.write(f"Initial Reference  : {str(Path(args.init_reference).resolve()) if args.init_reference else 'None (unaligned seed)'}\n")
+        f.write(f"Total Rounds       : {args.n_rounds}\n")
         f.write(f"Target Mode        : {mode_str}\n")
         f.write(f"Cost Metric        : {args.cost_metric}\n")
         f.write(f"Sinkhorn Iters     : {args.sinkhorn_iters} (reg={args.reg})\n")
         f.write(f"SGD Iters / LR     : {args.sgd_iters} / {args.sgd_lr}\n")
-        f.write(f"TRN Points / LP    : {args.num_points} / σ={args.lowpass_sigma} vox\n")
-        mask_info = f"Dilation={args.mask_dilation} vox, Th={args.mask_threshold}" if args.mask_dilation > 0 else "None (disabled)"
+        f.write(f"TRN Points         : {args.num_points}\n")
+        f.write(f"Density Threshold  : {args.threshold} (cutoff)\n")
+        f.write(f"TRN LP Filter σ    : {args.lowpass_sigma} vox\n")
+        wedge_info = f"{args.wedge_mask} (Fourier-space wedge-masked)" if args.wedge_mask else "None (real-space sum)"
+        f.write(f"Wedge Mask         : {wedge_info}\n")
+        mask_info = f"Dilation={args.mask_dilation} vox, Th={args.mask_threshold} (active Round 2+)" if args.mask_dilation > 0 else "None (disabled)"
         f.write(f"Reference Mask     : {mask_info}\n")
-        lp_info = f"{args.lp_shells} shells (rolloff={args.lp_rolloff})" if args.lp_shells > 0 else "None (disabled)"
+        lp_info = f"{args.lp_shells} shells (rolloff={args.lp_rolloff}), active Round 1+" if args.lp_shells > 0 else "None (disabled)"
         f.write(f"Ref Shell LP Filter: {lp_info}\n")
+        comm_info = f"{common_rounds} rounds (Rounds 1-{common_rounds} use combined ref)" if common_rounds > 0 else "0 (independent split from Round 1)"
+        f.write(f"Common Ref Rounds  : {comm_info}\n")
+        rej_info = f"{rej_frac:.2f} (keeping top {int(round((1.0 - rej_frac)*100))}% particles by Wass distance)" if rej_frac > 0.0 else "0.00 (keep all particles)"
+        f.write(f"Rejection Fraction : {rej_info}\n")
+        f.write(f"Random Seed        : {args.seed}\n")
         f.write(f"Pixel Size (apix)  : {args.apix} Å\n")
         f.write(f"Total Pipeline Time: {total_time:.1f}s ({total_time / 60.0:.2f} min)\n")
         f.write("-" * 82 + "\n\n")
@@ -971,6 +1149,20 @@ def write_summary_files(run_dir: Path, sys_info: dict, args: argparse.Namespace,
             fsc143 = f"{m['fsc_0143_res_angstrom']:.2f} Å" if m['fsc_0143_res_angstrom'] else "None"
             f.write(f"{r:<7} | {ev_t:<11} | {od_t:<11} | {rnd_t:<12} | {fsc5:<12} | {fsc143:<12}\n")
         f.write("=" * 82 + "\n")
+
+        if best_info:
+            f.write("\n" + "=" * 82 + "\n")
+            f.write(f"BEST FSC COMBINED AVERAGE (ROUND {best_info['best_round']:02d})\n")
+            f.write("=" * 82 + "\n")
+            f.write(f"Best Round         : Round {best_info['best_round']:02d}\n")
+            fsc143_s = f"{best_info['fsc_0143_res_angstrom']:.2f} Å" if best_info.get('fsc_0143_res_angstrom') else "None"
+            fsc500_s = f"{best_info['fsc_0500_res_angstrom']:.2f} Å" if best_info.get('fsc_0500_res_angstrom') else "None"
+            f.write(f"FSC @ 0.143        : {fsc143_s}\n")
+            f.write(f"FSC @ 0.500        : {fsc500_s}\n")
+            f.write(f"Inverted MRC       : {best_info['inverted_mrc_filename']}\n")
+            f.write(f"Inverted Tagged    : {best_info['inverted_mrc_tagged_filename']}\n")
+            f.write(f"Full Path          : {best_info['inverted_mrc_path']}\n")
+            f.write("=" * 82 + "\n")
 
 
 # ── Main Entrypoint ───────────────────────────────────────────────────────────
@@ -1070,7 +1262,35 @@ def main():
         help="Width of the raised-cosine roll-off zone in Fourier shells (default: 2)."
     )
 
+    # Common reference rounds for Even & Odd splits
+    parser.add_argument(
+        "--common_ref_rounds", type=int, default=0,
+        help=(
+            "Number of initial iterative alignment rounds (e.g. 2) to use the common combined "
+            "average as the reference for both Even and Odd half-sets. From round "
+            "(common_ref_rounds + 1) onwards, each half-set uses its own respective reference. "
+            "Default: 0 (independent references from Round 1 onwards)."
+        ),
+    )
+
+    # Particle rejection based on Wasserstein distance
+    parser.add_argument(
+        "--rejection_fraction", type=float, default=0.0,
+        help=(
+            "Fraction of subtomograms with worst (highest) Wasserstein distance to reject when "
+            "building the reconstructed half-set reference volumes (default: 0.0 = keep all). "
+            "For example, 0.20 keeps the top 80%% best-matching particles in each half-set."
+        ),
+    )
+
     args = parser.parse_args()
+
+    if not (0.0 <= args.rejection_fraction < 1.0):
+        print(f"Error: rejection_fraction must be in [0.0, 1.0), got {args.rejection_fraction}", file=sys.stderr)
+        sys.exit(1)
+    if args.common_ref_rounds < 0:
+        print(f"Error: common_ref_rounds must be >= 0, got {args.common_ref_rounds}", file=sys.stderr)
+        sys.exit(1)
 
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -1095,7 +1315,9 @@ def main():
         wedge_suffix = "_wedge" if args.wedge_mask is not None else ""
         refmask_suffix = "_refmask" if args.mask_dilation > 0 else ""
         lp_suffix = f"_lp{args.lp_shells}" if args.lp_shells > 0 else ""
-        run_dir_name = f"run_{timestamp}{snr_tag}_alignot_{args.n_rounds}rounds_gpu_{mode_label}{metric_suffix}{wedge_suffix}{refmask_suffix}{lp_suffix}"
+        common_suffix = f"_common{args.common_ref_rounds}r" if args.common_ref_rounds > 0 else ""
+        rej_suffix = f"_top{int(round((1.0 - args.rejection_fraction) * 100))}" if args.rejection_fraction > 0.0 else ""
+        run_dir_name = f"run_{timestamp}{snr_tag}_alignot_{args.n_rounds}rounds_gpu_{mode_label}{metric_suffix}{wedge_suffix}{refmask_suffix}{lp_suffix}{common_suffix}{rej_suffix}"
 
     run_dir = Path(args.output_base_dir) / run_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1107,22 +1329,34 @@ def main():
     logger.info("=" * 78)
     logger.info("ALIGNOT NATIVE GPU GOLD-STANDARD ITERATIVE SUBTOMOGRAM ALIGNMENT")
     logger.info("=" * 78)
-    logger.info(f"Start Time      : {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
-    logger.info(f"Output Directory: {run_dir.resolve()}")
-    logger.info(f"Subtomograms Dir: {args.cluster_dir}")
-    logger.info(f"Rounds          : {args.n_rounds}")
-    logger.info(f"Target Mode     : {args.target_mode} ({mode_label})")
-    logger.info(f"Cost Metric     : {args.cost_metric}")
-    logger.info(f"Sinkhorn Iters  : {args.sinkhorn_iters} (reg={args.reg})")
-    logger.info(f"SGD Iters / LR  : {args.sgd_iters} / {args.sgd_lr}")
-    logger.info(f"TRN Points / LP : {args.num_points} / σ={args.lowpass_sigma} vox")
+    logger.info(f"Start Time         : {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
+    logger.info(f"Output Directory   : {run_dir.resolve()}")
+    logger.info(f"Subtomograms Dir   : {args.cluster_dir}")
+    logger.info(f"Subtomograms Limit : {args.n_sbtms if args.n_sbtms > 0 else 'All'}")
+    logger.info(f"Initial Reference  : {str(Path(args.init_reference).resolve()) if args.init_reference else 'None (unaligned streaming seed)'}")
+    logger.info(f"Total Rounds       : {args.n_rounds}")
+    logger.info(f"Target Mode        : {args.target_mode} ({mode_label})")
+    logger.info(f"Cost Metric        : {args.cost_metric}")
+    logger.info(f"Sinkhorn Iters     : {args.sinkhorn_iters} (reg={args.reg})")
+    logger.info(f"SGD Iters / LR     : {args.sgd_iters} / {args.sgd_lr}")
+    logger.info(f"TRN Points         : {args.num_points}")
+    logger.info(f"Density Threshold  : {args.threshold} (cutoff)")
+    logger.info(f"TRN LP Filter σ    : {args.lowpass_sigma} vox")
+    wedge_log = f"{args.wedge_mask} (Fourier-space wedge-masked)" if args.wedge_mask else "None (real-space sum)"
+    logger.info(f"Wedge Mask         : {wedge_log}")
     refmask_log = f"Dilation={args.mask_dilation} vox, Th={args.mask_threshold} (active from Round 2)" if args.mask_dilation > 0 else "Disabled"
-    logger.info(f"Reference Mask  : {refmask_log}")
+    logger.info(f"Reference Mask     : {refmask_log}")
     lp_log = f"Cutoff={args.lp_shells} shells (rolloff={args.lp_rolloff}), active Round 1+" if args.lp_shells > 0 else "Disabled"
-    logger.info(f"Ref LP Filter   : {lp_log}")
-    logger.info(f"Pixel Size      : {args.apix} Å")
-    logger.info(f"Device          : {device} ({torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'})")
-    logger.info(f"TRN Workers     : {args.num_workers}")
+    logger.info(f"Ref LP Filter      : {lp_log}")
+    comm_log = f"{args.common_ref_rounds} rounds (Rounds 1-{args.common_ref_rounds} use combined ref, then branch)" if args.common_ref_rounds > 0 else "0 (independent split from Round 1)"
+    logger.info(f"Common Ref Rounds  : {comm_log}")
+    rej_log = f"{args.rejection_fraction:.2f} (keeping top {int(round((1.0 - args.rejection_fraction)*100))}% particles by Wass distance)" if args.rejection_fraction > 0.0 else "0.00 (keep all particles)"
+    logger.info(f"Rejection Fraction : {rej_log}")
+    logger.info(f"Random Seed        : {args.seed}")
+    logger.info(f"Pixel Size         : {args.apix} Å")
+    logger.info(f"Device             : {device} ({torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'})")
+    logger.info(f"TRN Workers        : {args.num_workers}")
+    logger.info(f"All CLI Arguments  : {vars(args)}")
 
     # Load wedge mask (optional). Must match the subtomogram box size.
     wedge_mask_gpu: Optional[torch.Tensor] = None
@@ -1190,11 +1424,12 @@ def main():
         ).cpu().numpy()
 
     # Save Round 0 References
-    alignot_utils.save_mrc(round_00_dir / "ref_even_round_00.mrc", ref_even)
-    alignot_utils.save_mrc(round_00_dir / "ref_odd_round_00.mrc", ref_odd)
+    alignot_utils.save_mrc(round_00_dir / "ref_even_round_00.mrc", ref_even, voxel_size=args.apix)
+    alignot_utils.save_mrc(round_00_dir / "ref_odd_round_00.mrc", ref_odd, voxel_size=args.apix)
 
     ref_comb_r0 = 0.5 * (ref_even + ref_odd)
-    alignot_utils.save_mrc(round_00_dir / "ref_combined_round_00.mrc", ref_comb_r0)
+    alignot_utils.save_mrc(round_00_dir / "ref_combined_round_00.mrc", ref_comb_r0, voxel_size=args.apix)
+    alignot_utils.save_inverted_mrc(round_00_dir / "ref_combined_round_00_inverted.mrc", ref_comb_r0, voxel_size=args.apix)
 
     # Compute FSC Round 0
     shell_centers, fsc_vals, n_voxels = compute_fsc(ref_even, ref_odd)
@@ -1235,6 +1470,7 @@ def main():
 
     current_ref_even = ref_even
     current_ref_odd  = ref_odd
+    current_ref_comb = ref_comb_r0
     prev_even_results: Optional[List[dict]] = None
     prev_odd_results: Optional[List[dict]] = None
 
@@ -1245,15 +1481,26 @@ def main():
         round_dir = run_dir / round_str
         round_dir.mkdir(parents=True, exist_ok=True)
 
+        # Select reference for Even and Odd half-sets
+        if r <= args.common_ref_rounds:
+            ref_input_even = current_ref_comb
+            ref_input_odd  = current_ref_comb
+            ref_mode_str = f"Common Combined Reference (Round {r-1:02d})"
+        else:
+            ref_input_even = current_ref_even
+            ref_input_odd  = current_ref_odd
+            ref_mode_str = f"Independent Half-Set References (Round {r-1:02d})"
+
         logger.info("\n" + "=" * 60)
         logger.info(f"STARTING ITERATION ROUND {r:02d} / {args.n_rounds:02d}")
+        logger.info(f"Reference Selection: {ref_mode_str} (common_ref_rounds={args.common_ref_rounds})")
         logger.info("=" * 60)
 
         # Align Even Half
         new_ref_even, even_metrics, even_align_results = run_half_set_round_gpu(
             half_name="even",
             cluster_paths=even_paths,
-            current_reference=current_ref_even,
+            current_reference=ref_input_even,
             round_dir=round_dir,
             round_idx=r,
             args=args,
@@ -1268,7 +1515,7 @@ def main():
         new_ref_odd, odd_metrics, odd_align_results = run_half_set_round_gpu(
             half_name="odd",
             cluster_paths=odd_paths,
-            current_reference=current_ref_odd,
+            current_reference=ref_input_odd,
             round_dir=round_dir,
             round_idx=r,
             args=args,
@@ -1332,6 +1579,12 @@ def main():
                 "half": "even",
                 "round": r,
                 "mean_score": even_metrics["mean_score"],
+                "mean_score_all": even_metrics["mean_score_all"],
+                "n_total": even_metrics["n_total"],
+                "n_accepted": even_metrics["n_accepted"],
+                "n_rejected": even_metrics["n_rejected"],
+                "rejection_fraction": even_metrics["rejection_fraction"],
+                "cutoff_score": even_metrics["cutoff_score"],
                 "align_time_s": even_metrics["align_time_s"],
                 "total_time_s": even_metrics["total_time_s"],
                 "inter_half_alignment": {
@@ -1352,12 +1605,13 @@ def main():
         df_metrics_even.to_csv(csv_out_even, index=False)
 
         # Save references (aligned even, original odd)
-        alignot_utils.save_mrc(round_dir / f"ref_even_{round_str}.mrc", aligned_ref_even)
-        alignot_utils.save_mrc(round_dir / f"ref_odd_{round_str}.mrc", new_ref_odd)
+        alignot_utils.save_mrc(round_dir / f"ref_even_{round_str}.mrc", aligned_ref_even, voxel_size=args.apix)
+        alignot_utils.save_mrc(round_dir / f"ref_odd_{round_str}.mrc", new_ref_odd, voxel_size=args.apix)
 
         # Combined reference (aligned even + odd) — for saving & plotting only
         ref_comb = 0.5 * (aligned_ref_even + new_ref_odd)
-        alignot_utils.save_mrc(round_dir / f"ref_combined_{round_str}.mrc", ref_comb)
+        alignot_utils.save_mrc(round_dir / f"ref_combined_{round_str}.mrc", ref_comb, voxel_size=args.apix)
+        alignot_utils.save_inverted_mrc(round_dir / f"ref_combined_{round_str}_inverted.mrc", ref_comb, voxel_size=args.apix)
 
         # Compute FSC between aligned even and odd (now in same frame)
         shell_centers, fsc_vals, n_voxels = compute_fsc(aligned_ref_even, new_ref_odd)
@@ -1406,18 +1660,50 @@ def main():
         # Update references and alignment history for next iteration
         current_ref_even = new_ref_even
         current_ref_odd  = new_ref_odd
-        prev_even_results = even_align_results
+        current_ref_comb = ref_comb
+
+        if r < args.common_ref_rounds:
+            prev_even_results = composed_even_results
+        else:
+            prev_even_results = even_align_results
         prev_odd_results  = odd_align_results
 
-        # Periodically update summary files
+        # Periodically update summary files and export current best FSC inverted map
+        best_round, best_metric = get_best_fsc_round(rounds_metrics)
+        best_info = save_best_fsc_inverted_reference(
+            run_dir=run_dir,
+            best_round=best_round,
+            best_metric=best_metric,
+            slices_history=slices_history,
+            apix=args.apix,
+            logger=logger,
+        )
+
         plot_all_rounds_fsc(fsc_history, args.apix, run_dir / "fsc_all_rounds_comparison.png")
         plot_all_rounds_slices(slices_history, args.cluster_dir, run_dir / "slices_all_rounds_comparison.png")
-        write_summary_files(run_dir, sys_info, args, rounds_metrics, total_pipeline_t0)
+        write_summary_files(run_dir, sys_info, args, rounds_metrics, total_pipeline_t0, best_info=best_info)
+
+    # Final summary check & export
+    best_round, best_metric = get_best_fsc_round(rounds_metrics)
+    best_info = save_best_fsc_inverted_reference(
+        run_dir=run_dir,
+        best_round=best_round,
+        best_metric=best_metric,
+        slices_history=slices_history,
+        apix=args.apix,
+        logger=logger,
+    )
+    write_summary_files(run_dir, sys_info, args, rounds_metrics, total_pipeline_t0, best_info=best_info)
 
     total_elapsed = time.perf_counter() - total_pipeline_t0
     logger.info("\n" + "=" * 78)
     logger.info("ALIGNOT NATIVE GPU ITERATIVE ALIGNMENT PIPELINE COMPLETED SUCCESSFULLY!")
     logger.info(f"Total Pipeline Runtime: {total_elapsed:.1f}s ({total_elapsed / 60.0:.2f} min)")
+    if best_info:
+        r143_val = best_info.get("fsc_0143_res_angstrom")
+        r_str = f"FSC@0.143 = {r143_val:.2f}Å" if r143_val else "FSC resolved"
+        logger.info(f"Best FSC Combined Avg : Round {best_info['best_round']:02d} ({r_str})")
+        logger.info(f"Inverted Density Map  : {best_info['inverted_mrc_path']}")
     logger.info(f"All outputs saved to  : {run_dir.resolve()}")
     logger.info("=" * 78)
 

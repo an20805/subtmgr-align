@@ -26,7 +26,7 @@ DEFAULT_REF_MRC = "alignOT/outputs/gpu_runs/run_20260924_155858_snr0.1_alignot_5
 THRESHOLDS = [-0.10, -0.15, -0.20, -0.25]
 
 # Dilation margin in voxels beyond the protein boundary (default: 8, ~32 Å):
-DILATION_VOX = 8
+DILATION_VOX = 4
 
 # Soft taper standard deviation in voxels (default: 3.0):
 TAPER_SIGMA = 3.0
@@ -60,7 +60,7 @@ import alignot_utils
 def build_reference_mask(
     ref_vol: np.ndarray,
     mask_threshold: float = -0.15,
-    dilation_vox: int = 8,
+    dilation_vox: int = 4,
     taper_sigma: float = 3.0,
     lowpass_sigma: float = 2.0,
 ) -> Tuple[np.ndarray, np.ndarray]:

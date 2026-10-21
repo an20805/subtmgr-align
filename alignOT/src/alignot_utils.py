@@ -62,11 +62,19 @@ def load_mrc(path, permissive=True):
         return np.array(mrc.data, dtype=np.float32)
 
 
-def save_mrc(path, arr):
+def save_mrc(path, arr, voxel_size=None):
     arr = np.asarray(arr, dtype=np.float32)
     with mrcfile.new(str(path), overwrite=True) as mrc:
         mrc.set_data(arr)
+        if voxel_size is not None:
+            mrc.voxel_size = float(voxel_size)
     return Path(path)
+
+
+def save_inverted_mrc(path, arr, voxel_size=None):
+    """Save contrast-inverted MRC density (-arr) for ChimeraX visualization."""
+    inv = -np.asarray(arr, dtype=np.float32)
+    return save_mrc(path, inv, voxel_size=voxel_size)
 
 
 def compute_streaming_average(paths, logger=None, progress_every=20):
