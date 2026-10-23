@@ -20,9 +20,12 @@ To achieve near-atomic structural resolution, hundreds to thousands of 3D sub-vo
 > [!IMPORTANT]
 > **Active Working Branch**: All current and upcoming development takes place on the **`dev` branch**. Previous experiments on $C_6$ multi-hypothesis (`feature/c6-multihypothesis`) have been concluded/deprecated.
 >
-> **Core Active Method**: **AlignOT SGD / Barycentric 1-NN SGD** with Native PyTorch GPU acceleration. All upcoming experiments build directly upon this GPU foundation.
+> **Core Active Method**: **AlignOT Native GPU Iterative Alignment** (`run_iterative_alignment_gpu_halfset.py`) with:
+> - Fourier shell low-pass filtering on intermediate references (`--lp_shells 23 --lp_rolloff 2`).
+> - Fourier-space wedge-masked volume accumulation (`--wedge_mask Data/wedge_mask.mrc`).
+> - Density thresholding: `threshold=0.7` for dense core ($16.86\text{ \AA}$ FSC), `threshold=0.6` for full envelope with resolved apical domain caps (best $W_2^2$ to Ground Truth = $134.11$).
 >
-> **Primary Evaluation Metric**: **Gold-Standard Even/Odd Half-Set FSC** (dividing the 200 particles into independent even and odd halves of 100 particles each, performing iterative alignment and averaging on both independently, and computing the FSC resolution at $\text{FSC} = 0.143$).
+> **Primary Evaluation Metric**: **Gold-Standard Even/Odd Half-Set FSC** (dividing 500 or 200 particles into independent even and odd halves, performing iterative alignment and averaging on both independently, and computing the FSC resolution at $\text{FSC} = 0.143$) along with **Map-to-Ground-Truth Cross-Correlation and 2-Wasserstein Distance ($W_2, W_2^2$)**.
 
 ### Repository Structure
 ```
@@ -103,49 +106,39 @@ flowchart TD
 
 ## 5. Standard Execution Commands
 
-### Running GPU AlignOT (All Particles)
+### Running Native GPU Gold-Standard Iterative Alignment
 ```bash
-# Run via wrapper script:
-bash scripts/run_alignot_gpu.sh
+# Production automated halfset runner (handles even/odd halves + inter-half alignment + FSC):
+bash scripts/run_alignot_iterative_fsc.sh
 
 # Or directly via Python CLI:
-/home/anshu/subtmgr-align/alignOT/alignot_env/bin/python alignOT/src/run_iterative_alignment_gpu.py \
-    --cluster_dir Data/0.1/Cluster_0 \
+alignOT/alignot_env/bin/python alignOT/src/run_iterative_alignment_gpu_halfset.py \
+    --cluster_dir Data/0.1/subtomograms/0 \
     --output_base_dir alignOT/outputs/gpu_runs \
-    --init_reference Data/0.mrc \
-    --selection_mode all \
-    --n_rounds 3 \
+    --n_rounds 5 \
     --num_workers 16 \
+    --num_points 500 \
+    --threshold 0.7 \
     --reg 100 \
     --sgd_lr 0.001 \
-    --sgd_iters 500 \
+    --sgd_iters 1000 \
+    --sinkhorn_iters 50 \
+    --lp_shells 23 \
+    --lp_rolloff 2 \
+    --wedge_mask Data/wedge_mask.mrc \
     --device cuda
 ```
 
-### Running Gold-Standard Even/Odd Half-Set Evaluation
-```bash
-# Run even half (100 particles) and odd half (100 particles) independently:
-/home/anshu/subtmgr-align/alignOT/alignot_env/bin/python alignOT/src/run_iterative_alignment_gpu.py \
-    --cluster_dir Data/0.1/Cluster_0 \
-    --output_base_dir alignOT/outputs/gpu_runs/halfset_even \
-    --selection_mode even \
-    --n_rounds 3 \
-    --device cuda
-
-/home/anshu/subtmgr-align/alignOT/alignot_env/bin/python alignOT/src/run_iterative_alignment_gpu.py \
-    --cluster_dir Data/0.1/Cluster_0 \
-    --output_base_dir alignOT/outputs/gpu_runs/halfset_odd \
-    --selection_mode odd \
-    --n_rounds 3 \
-    --device cuda
-
-# Calculate Gold-Standard Half-Set FSC curve & resolution:
-/home/anshu/subtmgr-align/alignOT/alignot_env/bin/python scripts/compute_fsc.py \
-    --vol1 <path/to/even_ref_round_03.mrc> \
-    --vol2 <path/to/odd_ref_round_03.mrc> \
-    --apix 4.0 \
-    --output_dir experiments/alignot_gpu_halfset_fsc
-```
+### HPC Cluster Deployment (Prajna & Kalpana)
+- **Prajna Cluster (`prajna.iitb.ac.in`)**:
+  - Partition: `l40` (Default, NVIDIA L40S ADA GPUs) with matching QoS `l40`.
+  - Submit job: `sbatch scripts/submit_prajna.slurm`
+  - Sync code to Prajna: `bash scripts/sync_to_prajna.sh`
+  - Sync results from Prajna: `bash scripts/sync_from_prajna.sh`
+- **Kalpana / Madhava Cluster (`kalpana.minds.iitb.ac.in`)**:
+  - Submit job: `sbatch scripts/submit_madhava.slurm`
+  - Sync code: `bash scripts/sync_to_kalpana.sh`
+  - Sync results: `bash scripts/sync_from_kalpana.sh`
 
 ### Inverting Volumes for UCSF ChimeraX Visualization
 Cryo-ET density maps have dark protein densities ($< 0$). Before opening in ChimeraX for isosurface rendering, invert the contrast:
